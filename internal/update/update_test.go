@@ -97,18 +97,26 @@ func TestPlatformAssetNameHasDeployerForm(t *testing.T) {
 	}
 }
 
+// Names that only share this platform's name as a prefix, or name another
+// platform, must NOT match; the exact name must.
 func TestPlatformAssetRequiresExactName(t *testing.T) {
-	l := Lancamento{Version: "v0.1.0-bh.10"}
-	// Another platform's asset must NOT match: the common-prefix case
-	// "barroso-harness-linux-amd64" vs "barroso-harness-linux-amd64-v2"
-	// aside, what matters is rejecting "barroso-harness-linux-arm64" when the
-	// platform is amd64.
-	l.Assets = []Asset{
-		{Name: "barroso-harness-linux-arm64"},
-		{Name: "barroso-harness-darwin-arm64"},
-	}
+	own := AssetPlataformaNome()
+	l := Lancamento{Version: "v0.1.0-bh.10", Assets: []Asset{
+		{Name: own + "-v2"},
+		{Name: own + "x"},
+		{Name: "barroso-harness-planet9-ppc64"},
+	}}
 	if _, err := l.AssetDaPlataforma(); err == nil {
-		t.Fatal("a release without this platform's binary should error")
+		t.Fatal("a release without this platform's exact binary should error")
+	}
+
+	l.Assets = []Asset{{Name: own}}
+	got, err := l.AssetDaPlataforma()
+	if err != nil {
+		t.Fatalf("AssetDaPlataforma: %v", err)
+	}
+	if got.Name != own {
+		t.Fatalf("asset %q, want %q", got.Name, own)
 	}
 }
 

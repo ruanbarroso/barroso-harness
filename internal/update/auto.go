@@ -89,7 +89,7 @@ func AutoInstalar(ctx context.Context, installed string) (string, error) {
 	} else {
 		var result installResult
 		result, err = installBinary(staging)
-		if err == nil && len(result.commands) > 0 {
+		if len(result.commands) > 0 {
 			err = errNeedsPermission
 		}
 	}

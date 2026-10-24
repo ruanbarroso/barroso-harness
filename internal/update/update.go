@@ -426,6 +426,8 @@ func compareVersions(a, b string) (int, error) {
 
 // ── helpers shared by both install_*.go ───────────────────────────────────
 
+var errPermissaoManual = fmt.Errorf("manual permission fallback: %w", os.ErrPermission)
+
 func isPermissionError(err error) bool {
 	return errors.Is(err, os.ErrPermission)
 }

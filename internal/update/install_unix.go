@@ -112,23 +112,38 @@ func installAt(target, staged string) (installResult, error) {
 	return installResult{path: target}, nil
 }
 
+// manualDir holds the copy the printed sudo commands install. It is apart
+// from the download staging on purpose: the callers remove the staging file
+// once installation returns, and the copy must outlive that. A var so tests
+// point it at a TempDir.
+var manualDir = func() string { return filepath.Join(stagingRoot(), "manual") }
+
+// permissionFallback copies staged where the user can reach it and returns the
+// sudo commands that finish the installation. The error is never nil: nothing
+// was installed yet.
 func permissionFallback(staged, target string) (installResult, error) {
-	cache, err := os.UserCacheDir()
+	dir := manualDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return installResult{}, err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(staged)+"-*")
 	if err != nil {
 		return installResult{}, err
 	}
-	fallback := filepath.Join(cache, "barroso-harness", "updates", filepath.Base(staged))
-	if err := os.MkdirAll(filepath.Dir(fallback), 0o700); err != nil {
+	fallback := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		removeIfExists(fallback)
 		return installResult{}, err
 	}
 	if err := copyFile(staged, fallback); err != nil {
+		removeIfExists(fallback)
 		return installResult{}, err
 	}
 	alias := filepath.Join(filepath.Dir(target), "bh")
 	return installResult{path: fallback, commands: []string{
 		fmt.Sprintf("sudo install -m 0755 %q %q", fallback, target),
 		fmt.Sprintf("sudo ln -sf %q %q", target, alias),
-	}}, nil
+	}}, errPermissaoManual
 }
 
 func copyFile(src, dst string) error {
@@ -137,6 +152,14 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
+	// O_TRUNC on the source itself would empty it before the copy reads a byte.
+	srcInfo, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if dstInfo, err := os.Stat(dst); err == nil && os.SameFile(srcInfo, dstInfo) {
+		return fmt.Errorf("copy %s onto itself", src)
+	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o700)
 	if err != nil {
 		return err

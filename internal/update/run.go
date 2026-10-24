@@ -97,7 +97,7 @@ func Rodar(ctx context.Context, out io.Writer, currentVersion string, confirm Co
 	result, err := installBinary(staging)
 	if err != nil {
 		if len(result.commands) > 0 {
-			fmt.Fprintln(out, "not enough permission to replace the binary; run the following, then retry /update:")
+			fmt.Fprintln(out, "not enough permission to replace the binary; run the following, then reopen bh:")
 			fmt.Fprintln(out, installCommands(result))
 			return false, err
 		}

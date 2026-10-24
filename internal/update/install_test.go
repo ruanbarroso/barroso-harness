@@ -3,9 +3,9 @@
 package update
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -55,9 +55,9 @@ func TestInstallUnixReplacesAndKeepsPrevious(t *testing.T) {
 	if want := "old-version"; readFile(t, kept) != want {
 		t.Fatalf("backup %q has %q, want %q", kept, readFile(t, kept), want)
 	}
-	// The staged file was consumed by the rename.
-	if _, err := os.Lstat(staged); !os.IsNotExist(err) {
-		t.Fatalf("staged should have been renamed: %v", err)
+	// Unix installs by copying into a temporary file before the atomic rename.
+	if got := readFile(t, staged); got != "v0.1.0-bh.9" {
+		t.Fatalf("staged has %q after install, want original contents", got)
 	}
 }
 
@@ -116,13 +116,24 @@ func TestInstallUnixDoesNotOverwriteExistingBackup(t *testing.T) {
 	}
 }
 
+// useManualDir points the sudo fallback's copy at a TempDir for the test.
+func useManualDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	prev := manualDir
+	manualDir = func() string { return dir }
+	t.Cleanup(func() { manualDir = prev })
+	return dir
+}
+
 // Without write permission on the target's directory (a root-owned binary in
 // /usr/local/bin), the installer does not give up: it returns ready-made sudo
-// commands.
+// commands — and an error, because nothing was installed yet.
 func TestInstallUnixWithoutPermissionReturnsSudoCommands(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: everything is writable, the EACCES path never happens")
 	}
+	useManualDir(t)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "barroso-harness")
 	staged := filepath.Join(dir, "staged")
@@ -139,11 +150,24 @@ func TestInstallUnixWithoutPermissionReturnsSudoCommands(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
 	result, err := installAt(target, staged)
-	if err == nil {
-		t.Fatal("without permission it should return an error, not silent success")
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("without permission it should return a permission error, got %v", err)
+	}
+	if readFile(t, target) != "old" {
+		t.Fatalf("target changed without permission: %q", readFile(t, target))
 	}
 	if len(result.commands) == 0 {
 		t.Fatalf("error without actionable commands: %v", err)
+	}
+	if got := readFile(t, result.path); got != "new" {
+		t.Fatalf("fallback copy %q has %q, want the staged contents", result.path, got)
+	}
+	info, statErr := os.Stat(result.path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("fallback copy is not executable: %v", info.Mode())
 	}
 	commands := strings.Join(result.commands, "\n")
 	if !strings.Contains(commands, "sudo install -m 0755") {
@@ -152,8 +176,60 @@ func TestInstallUnixWithoutPermissionReturnsSudoCommands(t *testing.T) {
 	if !strings.Contains(commands, "sudo ln -sf") {
 		t.Fatalf("missing the bh shortcut: %q", commands)
 	}
-	if !strings.Contains(commands, target) {
-		t.Fatalf("commands do not mention the target %q: %q", target, commands)
+	if !strings.Contains(commands, result.path) || !strings.Contains(commands, target) {
+		t.Fatalf("commands should mention the copy %q and the target %q: %q", result.path, target, commands)
+	}
+}
+
+// A fresh download is staged in the update cache under the asset's name. The
+// fallback copy must neither truncate that file (copying it onto itself) nor
+// be the file the caller removes once installation returns.
+func TestInstallUnixFallbackSurvivesStagingRemoval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: everything is writable, the EACCES path never happens")
+	}
+	cache := useManualDir(t)
+	staged := filepath.Join(cache, AssetPlataformaNome())
+	if err := os.WriteFile(staged, []byte("new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "barroso-harness")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	result, err := installAt(target, staged)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("want a permission error, got %v", err)
+	}
+	if readFile(t, staged) != "new" {
+		t.Fatalf("the fallback truncated the staged file: %q", readFile(t, staged))
+	}
+	if result.path == staged {
+		t.Fatalf("fallback copy is the staged file itself: %q", result.path)
+	}
+	removeIfExists(staged)
+	if got := readFile(t, result.path); got != "new" {
+		t.Fatalf("fallback copy %q has %q after the staging was removed", result.path, got)
+	}
+}
+
+// copyFile onto the same file would truncate it before reading.
+func TestCopyFileRefusesSameFile(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(name, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(name, name); err == nil {
+		t.Fatal("copying a file onto itself should error")
+	}
+	if readFile(t, name) != "data" {
+		t.Fatalf("source was truncated: %q", readFile(t, name))
 	}
 }
 
@@ -161,10 +237,11 @@ func TestInstallUnixWithoutPermissionReturnsSudoCommands(t *testing.T) {
 // real target, so updating through the symlink replaces the actual binary and
 // the shortcut keeps working — which is what this test pins.
 func TestInstallUnixResolvesShortcutSymlink(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("symlinks: covered where EvalSymlinks is available")
+	// TempDir may itself sit behind a symlink (/var → /private/var on macOS).
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	dir := t.TempDir()
 	real := filepath.Join(dir, "barroso-harness-real")
 	shortcut := filepath.Join(dir, "bh")
 	if err := os.WriteFile(real, []byte("old"), 0o755); err != nil {
