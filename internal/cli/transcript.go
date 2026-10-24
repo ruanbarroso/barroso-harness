@@ -12,7 +12,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -213,7 +213,7 @@ func renderUser(it *item, width int, hover bool) []string {
 		}
 		var chips []string
 		for _, p := range it.images {
-			chips = append(chips, chip("file", filepath.Base(p)))
+			chips = append(chips, chip("file", path.Base(strings.ReplaceAll(p, "\\", "/"))))
 		}
 		rows = append(rows, withBg(edge+"  "+strings.Join(chips, " "), bg, width))
 	}

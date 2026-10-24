@@ -187,11 +187,14 @@ func TestCompactionAndTurnEnd(t *testing.T) {
 func TestUserAttachmentChips(t *testing.T) {
 	colorsOn = true
 	defer func() { colorsOn = false }()
-	sc, _ := newTestScreen(t, 100, 40, panelState{model: "m"})
-	sc.UsuarioCom("look [Image 1]", []string{`C:\tmp\shot.png`})
-	txt := sc.transcriptText()
-	if !strings.Contains(txt, "look") || strings.Contains(txt, "[Image 1]") || !strings.Contains(txt, " file  shot.png") {
-		t.Fatalf("box:\n%s", txt)
+	// The chip shows the base name whichever OS wrote the path.
+	for _, p := range []string{`C:\tmp\shot.png`, "/tmp/shot.png", "shot.png"} {
+		sc, _ := newTestScreen(t, 100, 40, panelState{model: "m"})
+		sc.UsuarioCom("look [Image 1]", []string{p})
+		txt := sc.transcriptText()
+		if !strings.Contains(txt, "look") || strings.Contains(txt, "[Image 1]") || !strings.Contains(txt, " file  shot.png") {
+			t.Fatalf("%s: box:\n%s", p, txt)
+		}
 	}
 }
 
