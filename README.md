@@ -26,7 +26,7 @@ On Windows, `build-local.cmd [version]` builds into `dist\bh.exe` inside the rep
 
 ## Configure and use
 
-On a fresh install with neither `BARROSO_BASE_URL` nor `BARROSO_AUTH_TOKEN` set, the harness starts directly on OpenCode Zen (`https://opencode.ai/inference/openai/v1`), using the public key `public` and model `big-pickle` (Big Pickle, 200k context). No `bh -init` or setup step is required. The model is the stable default in Zen's catalog; other free models can be transient. Reasoning effort is disabled by default.
+On a fresh install with neither `BARROSO_BASE_URL` nor `BARROSO_AUTH_TOKEN` set, the harness starts directly on OpenCode Zen (`https://opencode.ai/zen/v1`), using the public key `public` and model `big-pickle` (Big Pickle, 200k context). No `bh -init` or setup step is required. The model is the stable default in Zen's catalog; other free models can be transient. Reasoning effort is disabled by default.
 
 To configure a different provider, use `/provider` in the REPL and enter its URL/key. To remove custom providers and restore the public Zen setup, use `/provider zen`. If either environment variable is set, it takes precedence and `/provider` is disabled until those variables are unset.
 

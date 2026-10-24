@@ -33,7 +33,7 @@ const DefaultBaseURL = "https://keys.barroso.tec.br/v1"
 // big-pickle — the free model there that stays up (the others come and go).
 const (
 	ZenProvider = "opencode-zen"
-	ZenBaseURL  = "https://opencode.ai/inference/openai/v1"
+	ZenBaseURL  = "https://opencode.ai/zen/v1"
 	ZenAPIKey   = "public"
 	ZenModel    = "big-pickle"
 	ZenJanela   = 200000 // models.opencode.ai: limit.context of big-pickle
