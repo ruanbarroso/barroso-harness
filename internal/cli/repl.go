@@ -708,7 +708,7 @@ func repl(io IO, cfg *config.Config) {
 		case "/effort":
 			handleEffort(io, cfg, sess, arg)
 		case "/provider":
-			if err := cmdProvider(io, cfg); err != nil {
+			if err := cmdProvider(io, cfg, arg); err != nil {
 				errorFmt(io.ErrOut, "error", err)
 				continue
 			}
@@ -874,11 +874,27 @@ func handleEffort(io IO, cfg *config.Config, sess *runtime.Session, arg string) 
 	}
 }
 
-// cmdProvider asks for base URL and key (hidden), validates /models and persists.
-// On validation failure the error propagates: neither memory nor disk changes.
-func cmdProvider(io IO, cfg *config.Config) error {
+// cmdProvider switches to a custom provider, or restores the public Zen
+// defaults with /provider zen (removing custom provider credentials).
+func cmdProvider(io IO, cfg *config.Config, arg string) error {
 	if cfg.FromEnv() {
 		return fmt.Errorf("provider is set by %s/%s; unset them to use /provider", config.EnvBaseURL, config.EnvAuthToken)
+	}
+	if strings.EqualFold(strings.TrimSpace(arg), "zen") || strings.EqualFold(strings.TrimSpace(arg), config.ZenProvider) {
+		draft := *cfg
+		draft.Providers = map[string]*config.Provider{
+			config.ZenProvider: {BaseURL: config.ZenBaseURL, APIKey: config.ZenAPIKey},
+		}
+		draft.CurrentProvider = config.ZenProvider
+		draft.BaseURL, draft.APIKey = config.ZenBaseURL, config.ZenAPIKey
+		draft.Model, draft.Effort = config.ZenModel, "none"
+		draft.Janela, draft.JanelaSource = config.ZenJanela, config.FonteCatalogo
+		if err := draft.Save(); err != nil {
+			return err
+		}
+		*cfg = draft
+		fmt.Fprintln(io.Out, "switched to OpenCode Zen (public) with big-pickle; custom providers removed.")
+		return nil
 	}
 	base := config.DefaultBaseURL
 	if p := cfg.Ativo(); p != nil && p.BaseURL != "" {

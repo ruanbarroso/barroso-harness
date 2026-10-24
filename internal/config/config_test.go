@@ -20,14 +20,56 @@ func home(t *testing.T) (string, func()) {
 	return dir, func() {}
 }
 
-func TestLoadWithoutFileReturnsEmptyNilError(t *testing.T) {
+// First install without BARROSO_* env: ready on OpenCode Zen + big-pickle.
+func TestLoadWithoutFileReturnsZenDefault(t *testing.T) {
 	home(t)
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("missing config.json must not be an error: %v", err)
 	}
-	if c.Pronta() {
-		t.Fatal("an empty config is not ready")
+	p := c.Ativo()
+	if !c.Pronta() || c.FromEnv() || c.CurrentProvider != ZenProvider || c.Model != ZenModel ||
+		p.BaseURL != ZenBaseURL || p.APIKey != ZenAPIKey || c.Janela != ZenJanela {
+		t.Fatalf("want the Zen default, got %+v (provider %+v)", c, p)
+	}
+	if strings.Contains(c.Resumo(), ZenAPIKey+" ") {
+		t.Fatalf("status line leaked the key: %s", c.Resumo())
+	}
+}
+
+func TestLoadEmptyFileIsNotReady(t *testing.T) {
+	dir, _ := home(t)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := Load(); c.Pronta() {
+		t.Fatal("an existing empty config is not ready (the default is only for first install)")
+	}
+}
+
+func TestInitWritesZenDefaultWithoutEnv(t *testing.T) {
+	home(t)
+	if err := Init(); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Pronta() || c.CurrentProvider != ZenProvider || c.Model != ZenModel || c.Effort != "none" {
+		t.Fatalf("Init did not persist the Zen default: %+v", c)
+	}
+}
+
+func TestInitWithEnvKeepsEmptySkeleton(t *testing.T) {
+	dir, _ := home(t)
+	t.Setenv(EnvAuthToken, "env-token")
+	if err := Init(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "config.json"))
+	if strings.Contains(string(b), ZenBaseURL) || strings.Contains(string(b), "env-token") {
+		t.Fatalf("with env set, Init must not write the Zen default nor the env token:\n%s", b)
 	}
 }
 

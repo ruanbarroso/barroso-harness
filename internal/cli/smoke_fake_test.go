@@ -22,7 +22,7 @@ import (
 func TestOnboardingEmptyEnterUsesDefaultBaseURL(t *testing.T) {
 	srv, _ := smokeServer(t, smokeCatalog)
 	defer srv.Close()
-	t.Setenv("BARROSO_HARNESS_HOME", t.TempDir())
+	emptyConfigHome(t)
 
 	// The default must be visible on screen before the choice. Since an empty
 	// Enter adopts the real default (keys.barroso.tec.br), the catalog must be
@@ -73,6 +73,18 @@ func TestOnboardingEmptyEnterUsesDefaultBaseURL(t *testing.T) {
 	}
 }
 
+// emptyConfigHome points the harness at a temp home holding an empty
+// config.json: without any file a fresh install starts ready on OpenCode Zen
+// (config.Padrao) and would skip onboarding — and hit the real network.
+func emptyConfigHome(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("BARROSO_HARNESS_HOME", dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"effort":"none"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // smokeServer serves /v1/models and /v1/chat/completions with a predictable
 // script and returns the captured requests (to inspect reasoning_effort).
 func smokeServer(t *testing.T, catalog string) (*httptest.Server, *[]map[string]any) {
@@ -111,7 +123,7 @@ const smokeCatalog = `{"data":[
 func TestSmokeOnboardingTurnModelEffort(t *testing.T) {
 	srv, seen := smokeServer(t, smokeCatalog)
 	defer srv.Close()
-	t.Setenv("BARROSO_HARNESS_HOME", t.TempDir())
+	emptyConfigHome(t)
 	old := PromptKey
 	PromptKey = func(string) (string, error) { return "fake-key", nil }
 	defer func() { PromptKey = old }()

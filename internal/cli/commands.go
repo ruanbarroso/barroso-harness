@@ -29,7 +29,7 @@ func commands() []command {
 	return []command{
 		{name: "/model", usage: "/model [id]", cat: "Model", desc: "list the catalog and switch model", key: "ctrl+x m", dialog: true},
 		{name: "/effort", usage: "/effort [level|-]", cat: "Model", desc: "show or set the reasoning effort", key: "ctrl+t", dialog: true},
-		{name: "/provider", usage: "/provider", cat: "Model", desc: "change base URL + key; validates /models before saving"},
+		{name: "/provider", usage: "/provider [zen]", cat: "Model", desc: "set a custom provider, or restore public OpenCode Zen and remove custom providers"},
 		{name: "/new", usage: "/new", cat: "Session", desc: "start a new session (the current one stays in /resume) on the home screen", key: "ctrl+x n"},
 		{name: "/resume", usage: "/resume", cat: "Session", desc: "list recent sessions and resume one", key: "ctrl+x l", dialog: true},
 		{name: "/save", usage: "/save [title]", cat: "Session", desc: "title the current session and save the log"},

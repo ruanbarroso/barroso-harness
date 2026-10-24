@@ -211,6 +211,41 @@ func TestReplProviderSwitchAndRollbackOnFailure(t *testing.T) {
 	}
 }
 
+// /provider zen restores the public default and removes custom providers.
+func TestReplProviderZenResetsCustomProviders(t *testing.T) {
+	custom := fakeModelsProvider(t, "custom-model")
+	defer custom.Close()
+	home := readyConfig(t, custom.URL+"/v1", "custom-secret", "custom-model")
+
+	io, outIO, errIO := bridgeIO(t, "/provider zen\n/exit\n")
+	if code := RunInteractive(io); code != 0 {
+		t.Fatalf("exit %d: out=%s err=%s", code, outIO.String(), errIO.String())
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Ativo()
+	if cfg.CurrentProvider != config.ZenProvider || cfg.Model != config.ZenModel ||
+		p == nil || p.BaseURL != config.ZenBaseURL || p.APIKey != config.ZenAPIKey ||
+		cfg.Effort != "none" || cfg.Janela != config.ZenJanela {
+		t.Fatalf("/provider zen did not restore defaults: %+v; provider=%+v", cfg, p)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("custom providers were not removed: %+v", cfg.Providers)
+	}
+	if _, ok := cfg.Providers[config.ZenProvider]; !ok {
+		t.Fatalf("Zen provider missing after reset: %+v", cfg.Providers)
+	}
+	b, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "custom-secret") || strings.Contains(string(b), custom.URL) {
+		t.Fatalf("removed provider credentials remain on disk: %s", b)
+	}
+}
+
 // /provider where the current model does not exist clears model and requires a choice.
 func TestReplProviderWithoutCurrentModelClearsModel(t *testing.T) {
 	current := fakeModelsProvider(t, "barroso-chat")

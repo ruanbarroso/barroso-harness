@@ -28,6 +28,38 @@ const (
 // style, with /v1 at the end).
 const DefaultBaseURL = "https://keys.barroso.tec.br/v1"
 
+// First-install defaults: with no config.json and no BARROSO_* env, the
+// harness starts on the OpenCode Zen gateway with its public key and
+// big-pickle — the free model there that stays up (the others come and go).
+const (
+	ZenProvider = "opencode-zen"
+	ZenBaseURL  = "https://opencode.ai/inference/openai/v1"
+	ZenAPIKey   = "public"
+	ZenModel    = "big-pickle"
+	ZenJanela   = 200000 // models.opencode.ai: limit.context of big-pickle
+)
+
+// Padrao is the ready-to-run config of a first install (see ZenProvider).
+// big-pickle publishes no reasoning_options, so effort goes out omitted.
+func Padrao() Config {
+	return Config{
+		CurrentProvider: ZenProvider,
+		Providers:       map[string]*Provider{ZenProvider: {BaseURL: ZenBaseURL, APIKey: ZenAPIKey}},
+		Model:           ZenModel,
+		Effort:          "none",
+		Janela:          ZenJanela,
+		JanelaSource:    FonteCatalogo,
+		BaseURL:         ZenBaseURL,
+		APIKey:          ZenAPIKey,
+		Home:            Dir(),
+	}
+}
+
+// envSet reports whether BARROSO_BASE_URL or BARROSO_AUTH_TOKEN is set.
+func envSet() bool {
+	return strings.TrimSpace(os.Getenv(EnvBaseURL)) != "" || strings.TrimSpace(os.Getenv(EnvAuthToken)) != ""
+}
+
 // Possible sources of the context window:
 //   - FonteCatalogo: value derived from the provider's /models (switching
 //     models may update or clear it).
@@ -257,14 +289,18 @@ func windowSource(s string) string {
 const DefaultEffort = "medium"
 
 // Load reads config.json and overlays BARROSO_BASE_URL / BARROSO_AUTH_TOKEN.
-// A missing file is NOT an error: it returns an empty config (the interactive
-// path starts onboarding; a one-shot turn reports what is missing).
+// A missing file is NOT an error: without BARROSO_* env it returns Padrao()
+// (OpenCode Zen, ready to run); with env it returns an empty config overlaid
+// by it (the interactive path asks only the model).
 func Load() (Config, error) {
 	c := Config{Home: Dir()}
 	path := filepath.Join(c.Home, "config.json")
 	b, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		if !envSet() {
+			return Padrao(), nil
+		}
 		c.applyEnv()
 		return c, nil
 	case err != nil:
@@ -376,7 +412,8 @@ func (c Config) Save() error {
 }
 
 // Init creates the data layout NON-destructively: a 0700 directory, a sample
-// global BARROSO.md and a config.json skeleton (completed by `bh` onboarding).
+// global BARROSO.md and a config.json — Padrao() without BARROSO_* env, an
+// empty skeleton (completed by `bh` onboarding) otherwise.
 // Nothing that already exists is overwritten.
 func Init() error {
 	dir := Dir()
@@ -393,6 +430,9 @@ func Init() error {
 	}
 	cfgPath := filepath.Join(dir, "config.json")
 	if _, err := os.Stat(cfgPath); errors.Is(err, os.ErrNotExist) {
+		if !envSet() {
+			return Padrao().Save()
+		}
 		return Config{Home: dir}.Save()
 	}
 	return nil

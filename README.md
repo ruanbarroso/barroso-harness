@@ -26,17 +26,14 @@ On Windows, `build-local.cmd [version]` builds into `dist\bh.exe` inside the rep
 
 ## Configure and use
 
-On first use, run `bh` (or `barroso-harness`) with no arguments. The CLI asks for:
+On a fresh install with neither `BARROSO_BASE_URL` nor `BARROSO_AUTH_TOKEN` set, the harness starts directly on OpenCode Zen (`https://opencode.ai/inference/openai/v1`), using the public key `public` and model `big-pickle` (Big Pickle, 200k context). No `bh -init` or setup step is required. The model is the stable default in Zen's catalog; other free models can be transient. Reasoning effort is disabled by default.
 
-1. **Base URL** — default `https://keys.barroso.tec.br/v1`; press Enter to keep it or enter another OpenAI Chat Completions compatible endpoint.
-2. **API key** — read without echo in the terminal.
-3. **Model** — fetches `GET /models`, filters chat models, sorts them alphabetically and lets you pick by number or ID.
-4. **Reasoning effort** — starts disabled; you can enable it during the conversation if the provider/model accepts it.
+To configure a different provider, use `/provider` in the REPL and enter its URL/key. To remove custom providers and restore the public Zen setup, use `/provider zen`. If either environment variable is set, it takes precedence and `/provider` is disabled until those variables are unset.
 
 The active key, base URL, provider and model are stored locally in `~/.barroso-harness/config.json` (file mode `0600` where supported; directory `0700`). The key must never be copied into code, README, Git or logs. `BARROSO_HARNESS_HOME` can change only the data directory. `-init` creates the layout non-destructively.
 
 ```bash
-bh                                  # onboarding (first run) or REPL
+bh                                  # REPL (fresh install already on OpenCode Zen)
 bh -p "list the files and tell me what you see"  # one non-interactive turn; uses the saved config
 bh -version
 bh -init
@@ -51,6 +48,7 @@ In-session commands:
 /effort high           sends reasoning_effort=high on the next requests
 /effort -              clears it; reasoning_effort is omitted (no silent fallback)
 /provider              changes base URL + key; validates /models before saving
+/provider zen          removes custom providers and restores public OpenCode Zen + big-pickle
 /new                   clears the session transcript (new conversation, config intact)
 /update                downloads and installs the newest release from the channel
 /skills                lists the skills; /<name> [args] runs one
