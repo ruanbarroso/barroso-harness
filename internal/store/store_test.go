@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // openTestStore opens in a temp directory; no network, no user disk.
@@ -213,13 +214,14 @@ func TestListSessionsOrdersByUpdatedAtDesc(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// updated_at has millisecond resolution; one event in each guarantees
-	// distinct timestamps without sleeping in the test.
 	for _, id := range []string{"s1", "s2", "s3"} {
 		if _, err := st.StoreEvent(id, "user_message", map[string]any{"content": id}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// updated_at has millisecond resolution: on a fast machine the events and
+	// the touch below land in the same millisecond, and the tie breaks by id.
+	time.Sleep(2 * time.Millisecond)
 	// s2 was used last → top of the list.
 	if err := st.TouchSession("s2"); err != nil {
 		t.Fatal(err)
