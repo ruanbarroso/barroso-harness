@@ -75,13 +75,22 @@ func truncatePrefix(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := s[:n]
-	// Back off while the last byte is a continuation byte (10xxxxxx): it means
-	// we cut inside a multibyte rune.
-	for len(cut) > 0 && !utf8.RuneStart(cut[len(cut)-1]) {
-		cut = cut[:len(cut)-1]
+	return trimPartialRune(s[:n])
+}
+
+// trimPartialRune drops an incomplete rune at the end of s. Checking only for
+// a trailing continuation byte (10xxxxxx) kept a lone leading byte: a cut
+// right after the first byte of "é".
+func trimPartialRune(s string) string {
+	for i := len(s) - 1; i >= 0 && i >= len(s)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			if !utf8.FullRuneInString(s[i:]) {
+				return s[:i]
+			}
+			break
+		}
 	}
-	return cut
+	return s
 }
 
 // ── reconstruction ────────────────────────────────────────────────────────
@@ -144,6 +153,7 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 			Blob     string   `json:"blob"`
 			Preview  string   `json:"preview"`
 			Images   []string `json:"images"`
+			HookCtx  string   `json:"hook_context"`
 			Usage    *struct {
 				PromptTokens int `json:"prompt_tokens"`
 				OutputTokens int `json:"output_tokens"`
@@ -161,6 +171,9 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 			ToolArgs: p.ToolArgs,
 			IsErro:   p.IsErro,
 			Images:   p.Images,
+			// The hook context stays apart: Conteudo is what the user typed,
+			// and only the request to the model joins the two.
+			HookContext: p.HookCtx,
 		}
 		if p.Usage != nil {
 			m.Usage = &dealer.Usage{

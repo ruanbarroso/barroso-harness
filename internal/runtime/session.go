@@ -168,9 +168,10 @@ func (s *Session) rebuild() {
 	s.dealer = dealer.Novo(dealer.Config{
 		BaseURL: base, APIKey: key, Model: s.config.Model,
 		MaxTokens: s.config.MaxTokens, JanelaTokens: s.config.Janela,
-		Effort:    s.config.Effort,
-		FirstByte: secs(s.config.FirstByteSecs),
-		Idle:      secs(s.config.IdleSecs),
+		Effort:                   s.config.Effort,
+		DisableParallelToolCalls: s.config.DisableParallelToolCalls,
+		FirstByte:                secs(s.config.FirstByteSecs),
+		Idle:                     secs(s.config.IdleSecs),
 	})
 }
 
@@ -300,8 +301,22 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		s.baroMD = &b
 	}
 	baroMD := *s.baroMD
+	// Prompt hooks (memory recall) run before anything is recorded: a blocked
+	// prompt leaves no user_message and never reaches the model. Their
+	// context travels in HookContext, apart from what the user typed: screens,
+	// titles and ACP replay read Conteudo, only the request joins the two.
+	if len(s.config.PromptHooks) > 0 && s.Persistente() {
+		if rd, ok := r.(RendererDetalhado); ok {
+			rd.Pensando()
+		}
+	}
+	hooks := s.promptHooks(ctx, cwd, prompt)
+	if hooks.Blocked {
+		return hooks.err()
+	}
+	hookCtx := hooks.Context
 	working := append([]dealer.Mensagem(nil), s.history...)
-	working = append(working, dealer.Mensagem{Role: "user", Conteudo: prompt, Images: images})
+	working = append(working, dealer.Mensagem{Role: "user", Conteudo: prompt, Images: images, HookContext: hookCtx})
 	// The turn is never thrown away. Whatever way Send exits from here on —
 	// final answer, provider error after the retries, timeout, cancellation,
 	// guardrail — the history keeps the user prompt and every round that
@@ -339,6 +354,9 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	userEvent := map[string]any{"role": "user", "content": prompt}
 	if len(images) > 0 {
 		userEvent["images"] = images
+	}
+	if hookCtx != "" {
+		userEvent["hook_context"] = hookCtx
 	}
 	s.record("user_message", userEvent)
 
