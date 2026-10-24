@@ -10,11 +10,13 @@
 //	session/new    → creates a session with cwd; id "s-<8hex>"
 //	session/prompt → turn; session/update notifications during, response at the end
 //	session/cancel → cancels that session's in-flight turn
+//	session/load   → reopens a recorded session, replaying its history
+//	session/set_config_option, session/set_model → model / reasoning effort
+//	                 of the session (config_options.go)
 //
-// The rest of the protocol (session/load, session/list, session/resume,
-// session/set_config_option, authenticate, request_permission) was left out on
-// purpose: the harness does not persist sessions yet, has no two models to
-// switch at runtime and runs in YOLO — there is nothing to approve. Adding a
+// The rest of the protocol (session/list, session/resume, authenticate,
+// request_permission) was left out on purpose: the harness runs in YOLO —
+// there is nothing to approve. Adding a
 // new method is cheap; faking a capability the runtime lacks is not.
 //
 // Concurrency: the Handle loop reads sequentially, but session/prompt
@@ -99,6 +101,11 @@ type Agente struct {
 	// compaction: the client advertised clientCapabilities.session.compaction
 	// in initialize, so compaction_update may be sent (see Guardrail).
 	compaction atomic.Bool
+
+	// Catalogo fetches the provider's model list for configOptions; nil =
+	// dealer.Modelos. A seam for tests.
+	Catalogo func(ctx context.Context, baseURL, apiKey string) ([]dealer.CatalogModel, error)
+	catalog  catalogCache
 }
 
 // Novo creates the agent over cfg, with the production factory.
@@ -206,6 +213,10 @@ func (a *Agente) dispatch(ctx context.Context, w io.Writer, req Request) error {
 		return a.cancel(w, req)
 	case MetLoad:
 		return a.loadSession(w, req)
+	case MetSetConfig:
+		return a.setConfigOption(w, req)
+	case MetSetModel:
+		return a.setModel(w, req)
 	default:
 		a.logf("acp: unknown method: %s", req.Method)
 		return WriteError(w, req.ID, CodMetodo, "method not found: "+req.Method)
@@ -272,10 +283,13 @@ func (a *Agente) newSession(w io.Writer, req Request) error {
 		id = newSessionID()
 		_, exists = a.sessions[id]
 	}
-	a.sessions[id] = &session{id: id, cwd: cwd, turn: turn}
+	s := &session{id: id, cwd: cwd, turn: turn}
+	a.sessions[id] = s
 	a.mu.Unlock()
 	a.logf("acp: session %s created in %s", id, cwd)
-	return a.respond(w, NovaResposta(req.ID, map[string]any{"sessionId": id}))
+	res := a.sessionState(s)
+	res["sessionId"] = id
+	return a.respond(w, NovaResposta(req.ID, res))
 }
 
 // ── session/load ───────────────────────────────────────────────────────────
@@ -338,7 +352,8 @@ func (a *Agente) loadSession(w io.Writer, req Request) error {
 		a.replay(w, p.SessionID, h.History())
 	}
 	a.logf("acp: session %s loaded in %s", p.SessionID, cwd)
-	return a.respond(w, NovaResposta(req.ID, map[string]any{}))
+	loaded, _ := a.lookupSession(p.SessionID)
+	return a.respond(w, NovaResposta(req.ID, a.sessionState(loaded)))
 }
 
 // replay emits the transcript as notifications, in order. A tool_call and its
