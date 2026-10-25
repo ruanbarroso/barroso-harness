@@ -291,7 +291,11 @@ func toolCallSpec(deferred []tools.Spec) tools.Spec {
 				}
 				if miss := missingRequired(sp.Schema, args); len(miss) > 0 {
 					schema, _ := json.Marshal(sp.Schema)
-					return "", fmt.Errorf("%s needs %s; parameters: %s", name, strings.Join(miss, ", "), schema)
+					// Models that send only {"name": X} (step-5-preview, Bruce
+					// 2026-10-25: four okf_create calls in a row without arguments)
+					// need the shape spelled out, not just the schema.
+					return "", fmt.Errorf("%s needs %s; call it again as a real tool call: tool_call {\"name\": %q, \"arguments\": {%s}} — the arguments object is required, never write the call as text; parameters: %s",
+						name, strings.Join(miss, ", "), name, argsSkeleton(miss), schema)
 				}
 				return sp.Exec(ctx, cwd, args)
 			}
@@ -311,4 +315,14 @@ func shownCall(name, args string) (string, string) {
 		return name, args
 	}
 	return inner, string(a)
+}
+
+// argsSkeleton renders the missing fields as `"a": ..., "b": ...` for the
+// error message.
+func argsSkeleton(fields []string) string {
+	parts := make([]string, len(fields))
+	for i, f := range fields {
+		parts[i] = fmt.Sprintf("%q: ...", f)
+	}
+	return strings.Join(parts, ", ")
 }

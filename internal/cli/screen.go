@@ -2418,6 +2418,7 @@ func sessionTitle(h []dealer.Mensagem) string {
 	for _, m := range h {
 		if m.Role != "user" || isWorkingState(m.Conteudo) ||
 			strings.HasPrefix(m.Conteudo, "[subagents]") || strings.HasPrefix(m.Conteudo, "[output limit]") ||
+			strings.HasPrefix(m.Conteudo, "[tool call as text]") ||
 			strings.HasPrefix(m.Conteudo, runtime.UpdatePrefix) {
 			continue
 		}
@@ -2625,6 +2626,8 @@ func replayHistory(t *screen, h []dealer.Mensagem) {
 				t.AvisoSubagentes(m.Conteudo)
 			case strings.HasPrefix(m.Conteudo, "[output limit]"):
 				t.Adicionar("  " + yellowf("⚠") + " " + grayf("response cut at the output limit; continued"))
+			case strings.HasPrefix(m.Conteudo, "[tool call as text]"):
+				t.Adicionar("  " + yellowf("⚠") + " " + grayf("tool call came as text; asked again"))
 			case strings.HasPrefix(m.Conteudo, runtime.UpdatePrefix):
 				t.updateLines(m.Conteudo)
 			default:

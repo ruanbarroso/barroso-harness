@@ -326,6 +326,8 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	// transparently (Retry); only interrupted/length flows get a synthetic
 	// continuation note, and no harness appends a fake user message.
 	regens := 0
+	// Rounds re-asked because the call came written as text (see tooltext.go).
+	toolTextRetries := 0
 	reactiveDone := false
 	compacted := false
 	// Whole-turn totals: each tool cycle spends request and response, and the
@@ -529,6 +531,24 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 					continue
 				}
 				return fmt.Errorf("the provider returned an empty answer after %d attempts (finish_reason %q); no text and no tool calls — try lower reasoning effort or repeat the request", regens+1, round.Fim)
+			}
+			if len(list) > 0 && toolTextRetries < maxToolTextRetries && looksLikeToolText(round.Texto) {
+				// A call written as text is never an answer: keep the text in the
+				// transcript (the model sees what it did), tell it nothing ran and
+				// ask for the real call. Not shown as the answer.
+				toolTextRetries++
+				s.record("tool_texto", map[string]any{
+					"cycle":     cycle,
+					"fim":       round.Fim,
+					"bytes":     len(round.Texto),
+					"tentativa": toolTextRetries,
+				})
+				working = append(working,
+					dealer.Mensagem{Role: "assistant", Conteudo: round.Texto, Usage: round.Usage},
+					dealer.Mensagem{Role: "user", Conteudo: toolTextNotice})
+				s.record("assistant", map[string]any{"role": "assistant", "content": round.Texto})
+				s.record("user_message", map[string]any{"role": "user", "content": toolTextNotice})
+				continue
 			}
 			r.Resposta(round.Texto)
 			r.Tokens(promptUsage, outputUsage, time.Since(start), compacted)
