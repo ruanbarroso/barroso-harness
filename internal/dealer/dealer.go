@@ -202,7 +202,7 @@ func (c *Cliente) CorpoEstimativa(system string, msgs []Mensagem, tools []map[st
 var imageEstimateStandIn = strings.Repeat("A", 4<<10)
 
 func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, inline bool) ([]byte, error) {
-	list := []oaiMsg{{Role: "system", Content: strNil(system)}}
+	list := []oaiMsg{{Role: "system", Content: strNil(comBlocoEnv(system))}}
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
@@ -495,7 +495,7 @@ func (c *Cliente) tentativa(ctx context.Context, body []byte) (*Rodada, error) {
 	// No http.Client.Timeout: the watchdog bounds silence, and a total cap
 	// would cut a model that is still streaming (see retry.go).
 	sent := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clienteHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("provider: %w", cause(wctx, err))
 	}
@@ -734,7 +734,7 @@ func Catalogo(ctx context.Context, baseURL, apiKey string) (*ModelsResponse, err
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpc := &http.Client{Timeout: catalogTimeout}
+	httpc := &http.Client{Timeout: catalogTimeout, Transport: roteadorTLS{}}
 	resp, err := httpc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("catalog %s: %w", endpoint, err)

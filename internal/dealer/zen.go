@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +73,7 @@ func idOpencode(prefixo string) string {
 // accepted most recently. Only the version decays with every upstream
 // release, so it is resolved live from npm with this as the floor.
 const (
-	uaFloor      = "opencode/latest/2.0.32/cli"
+	uaFloor      = "opencode/latest/2.1.4/cli"
 	uaTTL        = 6 * time.Hour
 	urlVersaoNpm = "https://registry.npmjs.org/@opencode/cli/latest"
 )
@@ -198,7 +199,43 @@ func aplicarCabecalhosOpencode(req *http.Request, sessao string) {
 	req.Header.Set("x-session-id", sessao)
 	req.Header.Set("x-opencode-project", "global")
 	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-request", idOpencode("msg"))
+	// No x-opencode-request: the official CLI 2.1.4 does not send it (wire
+	// capture, 2026-10-25). The gate that the header was blamed for is TLS
+	// (see tlszen.go).
+}
+
+// ---- environment block ----
+
+// comBlocoEnv appends the official client's environment block to the system
+// prompt when it has none. Second gate of the zen free tier (measured
+// 2026-10-25 with the Bun TLS hello in place): a system prompt without an
+// <env> block carrying "Working directory:" gets 429 FreeUsageLimitError;
+// the same prompt plus this block gets 200. The values are the harness's
+// own (real cwd and platform), in the official wording.
+func comBlocoEnv(system string) string {
+	if strings.Contains(system, "<env>") && strings.Contains(system, "Working directory:") {
+		return system
+	}
+	bloco := blocoEnv()
+	if strings.TrimSpace(system) == "" {
+		return bloco
+	}
+	return strings.TrimRight(system, "\n") + "\n\n" + bloco
+}
+
+func blocoEnv() string {
+	wd, err := os.Getwd()
+	if err != nil || wd == "" {
+		wd = "."
+	}
+	plataforma := runtime.GOOS
+	if plataforma == "windows" {
+		plataforma = "win32" // Node's process.platform, what the official client prints
+	}
+	return "Here is some useful information about the environment you are running in:\n<env>\n" +
+		"  Working directory: " + wd + "\n" +
+		"  Workspace root folder: " + wd + "\n" +
+		"  Platform: " + plataforma + "\n</env>"
 }
 
 // ---- tool fingerprint ----

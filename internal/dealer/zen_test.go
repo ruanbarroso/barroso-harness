@@ -170,7 +170,7 @@ func TestCorpoFingerprint(t *testing.T) {
 	if m.Messages[0].Role != "system" || !strings.Contains(m.Messages[0].Content, "placeholder") {
 		t.Fatalf("decoy brake missing; first message: %+v", m.Messages[0])
 	}
-	if m.Messages[1].Content != "sys" {
+	if !strings.HasPrefix(m.Messages[1].Content, "sys\n\n") || !strings.Contains(m.Messages[1].Content, "<env>") {
 		t.Fatalf("official system must follow the brake: %+v", m.Messages[1])
 	}
 }
@@ -222,7 +222,7 @@ func TestDesduplicarIDsDeChamada(t *testing.T) {
 }
 
 // TestRodarEnviaContrato: full headers on a real round — session stable per
-// conversation, msg_ per request, the client identity, the whole pair.
+// conversation, no x-opencode-request, the client identity, the whole pair.
 func TestRodarEnviaContrato(t *testing.T) {
 	t.Setenv("ZEN_USER_AGENT", "opencode/latest/9.9.9/test")
 	var sessao1, sessao2, request1, cliente, projeto string
@@ -260,8 +260,8 @@ func TestRodarEnviaContrato(t *testing.T) {
 	if !strings.HasPrefix(sessao1, "ses_") || sessao1 != sessao2 {
 		t.Fatalf("session must be stable per conversation: %q / %q", sessao1, sessao2)
 	}
-	if !strings.HasPrefix(request1, "msg_") {
-		t.Fatalf("x-opencode-request %q is not the canonical msg_ shape", request1)
+	if request1 != "" {
+		t.Fatalf("x-opencode-request %q: the official CLI 2.1.4 does not send it", request1)
 	}
 	if cliente != "cli" || projeto != "global" {
 		t.Fatalf("client=%q project=%q; want cli/global", cliente, projeto)
