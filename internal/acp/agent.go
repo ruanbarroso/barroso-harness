@@ -10,14 +10,14 @@
 //	session/new    → creates a session with cwd; id "s-<8hex>"
 //	session/prompt → turn; session/update notifications during, response at the end
 //	session/cancel → cancels that session's in-flight turn
-//	session/load   → reopens a recorded session, replaying its history
+//	session/load, session/resume → reopen a recorded session, replaying its history
 //	session/set_config_option, session/set_model → model / reasoning effort
 //	                 of the session (config_options.go)
 //
-// The rest of the protocol (session/list, session/resume, authenticate,
-// request_permission) was left out on purpose: the harness runs in YOLO —
-// there is nothing to approve. Adding a
-// new method is cheap; faking a capability the runtime lacks is not.
+// The rest of the protocol (session/list, authenticate, request_permission)
+// was left out on purpose: the harness runs in YOLO — there is nothing to
+// approve. Adding a new method is cheap; faking a capability the runtime
+// lacks is not.
 //
 // Concurrency: the Handle loop reads sequentially, but session/prompt
 // dispatches the turn on a goroutine — that is what lets session/cancel arrive
@@ -59,6 +59,7 @@ const (
 	MetPrompt      = "session/prompt"
 	MetCancel      = "session/cancel"
 	MetLoad        = "session/load"
+	MetResume      = "session/resume"
 )
 
 // Carregador reopens a recorded session by id. It returns an error when the
@@ -211,7 +212,11 @@ func (a *Agente) dispatch(ctx context.Context, w io.Writer, req Request) error {
 		return a.prompt(ctx, w, req)
 	case MetCancel:
 		return a.cancel(w, req)
-	case MetLoad:
+	case MetLoad, MetResume:
+		// session/resume is an alias of session/load here: both reopen a
+		// recorded session and replay it. A real resume-only agent (new id per
+		// resume) would differ, but the bh reuses the recorded id, so the
+		// client can use either name and get the same session back.
 		return a.loadSession(w, req)
 	case MetSetConfig:
 		return a.setConfigOption(w, req)

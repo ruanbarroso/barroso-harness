@@ -168,3 +168,31 @@ func TestSessionLoadWithoutSessionId(t *testing.T) {
 		t.Fatalf("expected -32602, got %+v", ls[0])
 	}
 }
+
+// session/resume is the alias the connector tries FIRST (the bh reuses the
+// recorded id, so resume and load are the same operation here).
+func TestSessionResumeReplaysHistoryLikeLoad(t *testing.T) {
+	h := setupWithLoader(t, func(_ config.Config, id string) (Turno, error) {
+		if id != "bh-old" {
+			return nil, errors.New("nonexistent session")
+		}
+		return &turnWithHistory{fakeTurn: newFakeTurn(), h: testHistory()}, nil
+	})
+	h.send(t, MetResume, 9, map[string]any{"sessionId": "bh-old"})
+	// user + tool_call + tool_call_update + agent_message + response
+	ls := waitLines(t, h.out, 5)
+	kinds := []string{}
+	for _, l := range ls[:4] {
+		kinds = append(kinds, l.Params.Update.SessionUpdate)
+	}
+	want := []string{"user_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("replay order = %v, want %v", kinds, want)
+		}
+	}
+	resp := ls[4]
+	if resp.Error != nil || string(resp.ID) != "9" {
+		t.Fatalf("unexpected final response: %+v", resp)
+	}
+}
