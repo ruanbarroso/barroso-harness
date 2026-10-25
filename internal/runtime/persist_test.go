@@ -311,6 +311,114 @@ func TestResumeRehydratesBlob(t *testing.T) {
 	}
 }
 
+// A turn interrupted with tool calls in flight kept the calls in the log
+// without their results (Bruce, 2026-10-24: the resumed transcript carried
+// two tool_use with no tool_result and EVERY later turn was rejected
+// upstream — the client only saw silence and times out). Resume closes the
+// gap with a synthetic cancelled result, and records it so the next resume
+// does not repair again.
+func TestResumeClosesOrphanToolCalls(t *testing.T) {
+	st := testStore(t)
+	const id = "bh-20240101110000-0004"
+	s := NewSessionWithStore(config.Config{}, st, id)
+	events := []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"user_message", map[string]any{"role": "user", "content": "read the files"}},
+		{"tool_call", map[string]any{
+			"role": "tool_call", "tool_id": "call_1", "tool_name": "read",
+			"tool_args": `{"path":"a.txt"}`,
+		}},
+		{"tool_call", map[string]any{
+			"role": "tool_call", "tool_id": "call_2", "tool_name": "glob",
+			"tool_args": `{"pattern":"**/*.txt"}`,
+		}},
+		{"tool_result", map[string]any{
+			"role": "tool_result", "tool_id": "call_1", "tool_name": "read",
+			"content": "1: aaa",
+		}},
+	}
+	for _, e := range events {
+		s.record(e.kind, e.payload)
+	}
+
+	s2 := NewSessionWithStore(config.Config{}, st, id)
+	if err := s2.Resume(); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := s2.History()
+	if len(h) != 5 {
+		t.Fatalf("history = %d messages; want 4 replayed + 1 synthetic:\n%+v", len(h), h)
+	}
+	if h[3].Role != "tool_result" || h[3].ToolID != "call_1" || h[3].Conteudo != "1: aaa" {
+		t.Fatalf("the real result changed position: %+v", h[3])
+	}
+	if h[4].Role != "tool_result" || h[4].ToolID != "call_2" || h[4].ToolName != "glob" || !h[4].IsErro {
+		t.Fatalf("synthetic result is not the cancelled call_2: %+v", h[4])
+	}
+	if !strings.Contains(h[4].Conteudo, "interrupted") {
+		t.Fatalf("synthetic result without the interruption note: %q", h[4].Conteudo)
+	}
+
+	// The repair entered the log: a third process must rebuild the SAME
+	// transcript without appending new synthetic results again.
+	eventsAfter, err := st.ListEvents(id, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nResults := 0
+	for _, e := range eventsAfter {
+		if e.Kind == "tool_result" {
+			nResults++
+		}
+	}
+	if nResults != 2 {
+		t.Fatalf("%d tool_result events after the repair; want 2", nResults)
+	}
+	s3 := NewSessionWithStore(config.Config{}, st, id)
+	if err := s3.Resume(); err != nil {
+		t.Fatalf("third process Resume: %v", err)
+	}
+	if len(s3.History()) != 5 {
+		t.Fatalf("third process rebuilt %d messages (re-repaired?):\n%+v", len(s3.History()), s3.History())
+	}
+}
+
+// A tool_result whose tool_call never entered the log must NOT be repaired:
+// the runtime never writes results without their calls (Send commits both
+// ends together), and observability-first tools (TestResumeRehydratesBlob
+// above, context stats) rely on a lone tool_result staying intact. Only a
+// MISSING result is repaired (TestResumeClosesOrphanToolCalls), because that
+// is what makes the resumed transcript invalid for providers that validate
+// the pairing.
+func TestResumeKeepsLoneResult(t *testing.T) {
+	st := testStore(t)
+	const id = "bh-20240101110000-0005"
+	s := NewSessionWithStore(config.Config{}, st, id)
+	events := []struct {
+		kind    string
+		payload map[string]any
+	}{
+		{"user_message", map[string]any{"role": "user", "content": "hi"}},
+		{"tool_result", map[string]any{
+			"role": "tool_result", "tool_id": "call_ghost", "tool_name": "read",
+			"content": "1: lone",
+		}},
+	}
+	for _, e := range events {
+		s.record(e.kind, e.payload)
+	}
+	s2 := NewSessionWithStore(config.Config{}, st, id)
+	if err := s2.Resume(); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h := s2.History()
+	if len(h) != 2 || h[1].Role != "tool_result" || h[1].Conteudo != "1: lone" {
+		t.Fatalf("lone tool_result was rewritten: %+v", h)
+	}
+}
+
 // ── Search / Retrieve ─────────────────────────────────────────────────────
 
 func TestSearchAndRetrieve(t *testing.T) {

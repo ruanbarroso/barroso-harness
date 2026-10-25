@@ -101,6 +101,7 @@ func (s *Session) Resume() error {
 		return err
 	}
 	s.history = eventsToMessages(s.store, events)
+	s.closeOrphanToolCalls()
 	return nil
 }
 
@@ -205,6 +206,69 @@ func oneLine(s string) string {
 		s = s[:limit] + "…"
 	}
 	return s
+}
+
+// closeOrphanToolCalls repairs a rebuilt transcript whose log ended
+// mid-round: a tool_call was recorded before its result and the process died
+// (kill, crash, connector restart) before recordResult wrote it. The resumed
+// transcript is then malformed: for Claude the WHOLE request is rejected —
+// "tool_use ids were found without tool_result blocks immediately after" —
+// and, with no frame of error on the way back, the client only sees silence,
+// so every turn of the resumed session times out instead of failing honestly
+// (Bruce, 2026-10-24: one cancel interrupted a grep/glob round in flight and
+// every later turn died in the 150 s watchdog ×2, in series).
+//
+// The orphan gets a synthetic result, in call order, recorded into the log
+// with "cancelled": true so later resumes do not repeat the repair. Results
+// without a call are left alone: the runtime never writes them (Send commits
+// both ends together) and the log is the observability layer, not something
+// the transcript rewrites silently.
+func (s *Session) closeOrphanToolCalls() {
+	hasResult := map[string]bool{}
+	callMsg := map[string]dealer.Mensagem{}
+	var orphans []dealer.Mensagem
+	for _, m := range s.history {
+		switch m.Role {
+		case "tool_call":
+			callMsg[m.ToolID] = m
+			orphans = append(orphans, m)
+		case "tool_result":
+			hasResult[m.ToolID] = true
+		}
+	}
+	if len(callMsg) == len(hasResult) {
+		// Common shape: every call has exactly one result (results also repeat
+		// when a blob rehydrates — can't prune calls by count alone).
+		balanced := true
+		for _, m := range orphans {
+			if !hasResult[m.ToolID] {
+				balanced = false
+				break
+			}
+		}
+		if balanced {
+			return
+		}
+	}
+	for _, call := range orphans {
+		if hasResult[call.ToolID] {
+			continue
+		}
+		const note = "[turn interrupted] This tool call was cancelled before any result was recorded; its execution state is unknown. " +
+			"Check the side effects on disk and re-run the tool if the task depends on it."
+		s.record("tool_result", map[string]any{
+			"role":      "tool_result",
+			"tool_id":   call.ToolID,
+			"tool_name": call.ToolName,
+			"content":   note,
+			"is_erro":   true,
+			"cancelled": true,
+		})
+		s.history = append(s.history, dealer.Mensagem{
+			Role: "tool_result", Conteudo: note,
+			ToolID: call.ToolID, ToolName: call.ToolName, IsErro: true,
+		})
+	}
 }
 
 // ── search and retrieval ──────────────────────────────────────────────────
