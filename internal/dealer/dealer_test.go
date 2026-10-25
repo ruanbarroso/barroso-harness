@@ -396,3 +396,200 @@ func TestBodyUserMessageWithImage(t *testing.T) {
 		t.Fatalf("plain user message changed: %s", p)
 	}
 }
+
+// TestCorpoFundeChamadasParalelas: a two-tool round enters as two adjacent
+// assistant messages (one call each — the transcript records parallel tools
+// that way) and must leave as ONE assistant announcing both calls, with both
+// results right after it. That is what the Anthropic dialect requires: the
+// translated body stacks every consecutive `tool` into one user message whose
+// only valid owner is the immediately preceding assistant.
+func TestCorpoFundeChamadasParalelas(t *testing.T) {
+	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	msgs := []Mensagem{
+		{Role: "user", Conteudo: "look"},
+		{Role: "tool_call", ToolID: "a1", ToolName: "grep", ToolArgs: `{"q":"x"}`},
+		{Role: "tool_call", ToolID: "b2", ToolName: "read", ToolArgs: `{"path":"y"}`},
+		{Role: "tool_result", ToolID: "a1", Conteudo: "grep out"},
+		{Role: "tool_result", ToolID: "b2", Conteudo: "read out"},
+	}
+	raw, err := c.Corpo("sys", msgs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	// two leading systems are expected: the harness system and the
+	// fingerprint brake note (existing behavior). What matters is the shape
+	// after them.
+	var rest []struct {
+		Role      string `json:"role"`
+		Content   string `json:"content"`
+		ToolCalls []struct {
+			ID string `json:"id"`
+		} `json:"tool_calls"`
+		ToolCallID string `json:"tool_call_id"`
+	}
+	for _, m := range body.Messages {
+		if m.Role == "system" {
+			continue
+		}
+		rest = append(rest, struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		}{m.Role, m.Content, m.ToolCalls, m.ToolCallID})
+	}
+	if len(rest) != 4 {
+		t.Fatalf("got %d non-system messages, want [user,assistant,tool,tool]", len(rest))
+	}
+	if rest[0].Role != "user" {
+		t.Fatalf("first = %+v", rest[0])
+	}
+	if rest[1].Role != "assistant" || len(rest[1].ToolCalls) != 2 {
+		t.Fatalf("round assistant = %+v", rest[1])
+	}
+	if rest[1].ToolCalls[0].ID != "a1" || rest[1].ToolCalls[1].ID != "b2" {
+		t.Fatalf("order = %+v", rest[1].ToolCalls)
+	}
+	if rest[2].Role != "tool" || rest[2].ToolCallID != "a1" ||
+		rest[3].Role != "tool" || rest[3].ToolCallID != "b2" {
+		t.Fatalf("results = %+v", rest[2:])
+	}
+}
+
+// TestCorpoReparaResultadoTardio: an orphan call healed with a synthetic
+// result appended AFTER later turns (the result lands behind unrelated
+// messages) must move next to its owner again — the Anthropic dialect pairs a
+// tool_result with the tool_use of the immediately preceding assistant.
+func TestCorpoReparaResultadoTardio(t *testing.T) {
+	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	msgs := []Mensagem{
+		{Role: "user", Conteudo: "first"},
+		{Role: "tool_call", ToolID: "a1", ToolName: "shell", ToolArgs: `{}`},
+		{Role: "user", Conteudo: "next turn"},
+		{Role: "assistant", Conteudo: "text"},
+		{Role: "user", Conteudo: "and more"},
+		{Role: "tool_result", ToolID: "a1", Conteudo: "late out"},
+		{Role: "user", Conteudo: "last"},
+	}
+	raw, err := c.Corpo("sys", msgs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			Content    string `json:"content"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	var flat []string
+	for _, m := range body.Messages {
+		if m.Role == "system" {
+			continue // the fingerprint brake prepends its own system note
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			var ids []string
+			for _, tc := range m.ToolCalls {
+				ids = append(ids, tc.ID)
+			}
+			flat = append(flat, "assistant:"+strings.Join(ids, "|"))
+			continue
+		}
+		flat = append(flat, m.Role+":"+m.ToolCallID)
+	}
+	want := []string{"user:", "assistant:a1", "tool:a1", "user:", "assistant:", "user:", "user:"}
+	if !reflect.DeepEqual(flat, want) {
+		t.Fatalf("repair = %v\nwant %v", flat, want)
+	}
+}
+
+// TestCorpoDescartaResultadoSemChamada: a result whose call appears nowhere
+// cannot be paired by any dialect (and the harness never writes one) — drop it.
+func TestCorpoDescartaResultadoSemChamada(t *testing.T) {
+	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	msgs := []Mensagem{
+		{Role: "user", Conteudo: "hi"},
+		{Role: "assistant", Conteudo: "no calls here"},
+		{Role: "tool_result", ToolID: "ghost", Conteudo: "unmated"},
+		{Role: "user", Conteudo: "again"},
+	}
+	raw, err := c.Corpo("sys", msgs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), `"role":"tool"`) != 0 {
+		t.Fatalf("unmated result survived: %s", raw)
+	}
+}
+
+// TestCorpoPreservaSequenciaSimples: strictly alternating single calls already
+// satisfy the adjacency rule; the pass-through must not reorder them.
+func TestCorpoPreservaSequenciaSimples(t *testing.T) {
+	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	msgs := []Mensagem{
+		{Role: "user", Conteudo: "go"},
+		{Role: "tool_call", ToolID: "a1", ToolName: "shell", ToolArgs: `{}`},
+		{Role: "tool_result", ToolID: "a1", Conteudo: "one"},
+		{Role: "tool_call", ToolID: "b2", ToolName: "shell", ToolArgs: `{}`},
+		{Role: "tool_result", ToolID: "b2", Conteudo: "two"},
+	}
+	raw, err := c.Corpo("sys", msgs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			ToolCallID string `json:"tool_call_id"`
+			ToolCalls  []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	var flat []string
+	for _, m := range body.Messages {
+		if m.Role == "system" {
+			continue // the fingerprint brake prepends its own system note
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			var ids []string
+			for _, tc := range m.ToolCalls {
+				ids = append(ids, tc.ID)
+			}
+			flat = append(flat, "assistant:"+strings.Join(ids, "|"))
+			continue
+		}
+		flat = append(flat, m.Role+":"+m.ToolCallID)
+	}
+	// sequential: every result still sits right after its own call, even
+	// though both calls live in an assistant of their own (no merge — they
+	// were never adjacent).
+	want := []string{"user:", "assistant:a1", "tool:a1", "assistant:b2", "tool:b2"}
+	if !reflect.DeepEqual(flat, want) {
+		t.Fatalf("sequence = %v\nwant %v", flat, want)
+	}
+}

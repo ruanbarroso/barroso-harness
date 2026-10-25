@@ -228,6 +228,22 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 			return nil, fmt.Errorf("unknown role: %q", m.Role)
 		}
 	}
+	// Anthropic wiring: multi-tool rounds formed as adjacent assistant
+	// messages (one call each) reject on the Claude degraus — the translated
+	// body groups every consecutive `tool` result into ONE user message,
+	// whose owner becomes the LAST assistant only, so the earlier calls look
+	// like results without calls (400 "unexpected tool_use_id found in
+	// tool_result blocks", measured on virtual claude-opus-5-5 at
+	// 2026-10-25 02:23Z). One assistant announcing the whole round keeps the
+	// pairs adjacency-valid on every dialect.
+	list = fundirChamadasConsecutivas(list)
+	// Same contract for positions: each `tool` message must sit right after
+	// the assistant that announced its id. Interrupted turns (healed orphan
+	// calls, results recorded after later turns) can leave results stranded
+	// behind unrelated messages; they are re-paired next to their owner, and
+	// results whose call appears nowhere are dropped (nothing upstream can
+	// pair them, and the harness never writes such a result).
+	list = reapararResultados(list)
 	// Duplicated tool-call ids across the history are rejected upstream with
 	// 400 — the first occurrence of each id keeps it, later ones are renamed
 	// with their paired results.
@@ -253,6 +269,82 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 	body["tools"] = wireTools
 	body["tool_choice"] = "auto"
 	return json.Marshal(body)
+}
+
+// textoDeResultado extrae o texto de um Content do oaiMsg (assistente leva
+// *string; usuário pode trazer []contentPart).
+func textoMensagem(v any) string {
+	switch t := v.(type) {
+	case *string:
+		if t != nil {
+			return *t
+		}
+	case string:
+		return t
+	}
+	return ""
+}
+
+// fundirChamadasConsecutivas collapses consecutive assistant messages that
+// each announce tool_calls into a single assistant carrying all of them. The
+// harness records every parallel tool of a round as its own tool_call message,
+// so a two-tool round built as [assistant A][assistant B][tool A][tool B] used
+// to translate on the Anthropic dialect to two assistants followed by one user
+// message with both results — and only the last call came with its result.
+func fundirChamadasConsecutivas(list []oaiMsg) []oaiMsg {
+	out := make([]oaiMsg, 0, len(list))
+	for _, m := range list {
+		ultimo := len(out) - 1
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 && ultimo >= 0 &&
+			out[ultimo].Role == "assistant" && len(out[ultimo].ToolCalls) > 0 {
+			if textoMensagem(out[ultimo].Content) == "" {
+				out[ultimo].Content = m.Content
+			}
+			out[ultimo].ToolCalls = append(out[ultimo].ToolCalls, m.ToolCalls...)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// reapararResultados re-positions every tool result immediately after the
+// assistant that announced its tool_call_id, preserving each owner's results
+// in encounter order (results of the merged round travel as a group, which is
+// exactly what the translation stacks into one user message). A result whose
+// call appears nowhere in the body is dropped: unreachable by any dialect.
+func reapararResultados(list []oaiMsg) []oaiMsg {
+	dono := make(map[string]int, len(list))
+	for i, m := range list {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, c := range m.ToolCalls {
+			dono[c.ID] = i
+		}
+	}
+	esperando := make(map[int][]oaiMsg, len(list))
+	for _, m := range list {
+		if m.Role != "tool" {
+			continue
+		}
+		j, ok := dono[m.ToolCallID]
+		if !ok {
+			continue // no call announced it: unmated result
+		}
+		esperando[j] = append(esperando[j], m)
+	}
+	var out []oaiMsg
+	for i, m := range list {
+		if m.Role == "tool" {
+			continue // re-attached next to its owner (or dropped)
+		}
+		out = append(out, m)
+		if m.Role == "assistant" {
+			out = append(out, esperando[i]...)
+		}
+	}
+	return out
 }
 
 // contentPart is one element of a multimodal user content (OpenAI Chat
