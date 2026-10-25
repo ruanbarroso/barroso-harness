@@ -716,3 +716,71 @@ func TestLogToolsReadAnotherSession(t *testing.T) {
 		t.Fatalf("unknown id:\n%s", bad)
 	}
 }
+
+// Regression (conversation 100135, session bh-20261024224403-789b, 2026-10-25):
+// after a process restart Resume rehydrated the whole log (the guardrail's
+// in-memory stubs never reach it), and most of the weight sat in tool_call
+// arguments and results under 2 KiB — nothing prune can stub. The turn died
+// with "pruning did not free enough". The guardrail now forces a mechanical
+// compaction, persisted so the next Resume starts small too.
+func TestGuardrailForcesCompactionWhenPruneCannot(t *testing.T) {
+	srv := textProvider(t, "back on track")
+	defer srv.Close()
+	st := testStore(t)
+	const id = "bh-20240101140000-0003"
+	cfg := fakeConfig(t, srv.URL)
+	cfg.Janela = 40_000
+
+	seed := NewSessionWithStore(cfg, st, id)
+	seed.record("user_message", map[string]any{"role": "user", "content": "first request: fix the gateway"})
+	for i := 0; i < 60; i++ {
+		cid := fmt.Sprintf("c%d", i)
+		seed.record("tool_call", map[string]any{"role": "tool_call", "tool_id": cid, "tool_name": "write",
+			"tool_args": `{"content":"` + strings.Repeat("a", 4000) + `"}`})
+		seed.record("tool_result", map[string]any{"role": "tool_result", "tool_id": cid, "tool_name": "write", "content": "ok"})
+	}
+	seed.record("assistant", map[string]any{"role": "assistant", "content": "gateway fixed, flag removed"})
+
+	s := NewSessionWithStore(cfg, st, id)
+	if err := s.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "keep the caller check"); err != nil {
+		t.Fatalf("turn should survive through a forced compaction: %v", err)
+	}
+	h := s.History()
+	if len(h) == 0 || !isSummary(h[0].Conteudo) {
+		t.Fatalf("history should start with the forced state, got %+v", h[:min(len(h), 2)])
+	}
+	if !strings.Contains(h[0].Conteudo, "gateway fixed, flag removed") || !strings.Contains(h[0].Conteudo, "first request") {
+		t.Fatalf("forced state lost the conversation's words:\n%s", h[0].Conteudo)
+	}
+
+	// A new process resumes from the compaction, not from the full log.
+	again := NewSessionWithStore(cfg, st, id)
+	if err := again.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if got := historyBytes(again.History()); got > 40_000 {
+		t.Fatalf("resume should re-apply the forced compaction, history has %d bytes", got)
+	}
+}
+
+func TestForcedStateKeepsNewestWithinCap(t *testing.T) {
+	var h []dealer.Mensagem
+	h = append(h, dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + "old state"})
+	for i := 0; i < 200; i++ {
+		h = append(h, dealer.Mensagem{Role: "assistant", Conteudo: fmt.Sprintf("note %03d %s", i, strings.Repeat("é", 300))})
+	}
+	h = append(h, dealer.Mensagem{Role: "user", Conteudo: "current"})
+	got := forcedState(h)
+	if len(got) > maxForcedState {
+		t.Fatalf("state over the cap: %d", len(got))
+	}
+	if !strings.Contains(got, "old state") || !strings.Contains(got, "note 199") || strings.Contains(got, "note 000") {
+		t.Fatalf("expected previous state + newest notes only")
+	}
+	if forcedState([]dealer.Mensagem{{Role: "user", Conteudo: "only"}}) != "" {
+		t.Fatal("nothing before the current request: no state")
+	}
+}

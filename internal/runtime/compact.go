@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
@@ -142,6 +143,71 @@ func compactHistory(h []dealer.Mensagem, state string) []dealer.Mensagem {
 	out := make([]dealer.Mensagem, 0, len(h)-cut+1)
 	out = append(out, dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + state})
 	return append(out, h[cut:]...)
+}
+
+// maxForcedState caps the mechanical state written by the guardrail.
+const maxForcedState = 24 << 10
+
+// forcedState builds the state of a guardrail-forced compaction, used when
+// pruning tool results cannot make the request fit: the latest summary (if
+// any) plus the conversation's own words — user requests and assistant
+// texts, newest kept first when over the cap. Tool calls and results are left
+// out; session_search recovers them. Returns "" when there is nothing before
+// the current request to compact.
+func forcedState(h []dealer.Mensagem) string {
+	cut := -1
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role == "user" && !isSummary(h[i].Conteudo) {
+			cut = i
+			break
+		}
+	}
+	if cut <= 0 {
+		return ""
+	}
+	prev := ""
+	var lines []string
+	for _, m := range h[:cut] {
+		c := strings.TrimSpace(m.Conteudo)
+		switch {
+		case m.Role == "user" && isSummary(m.Conteudo):
+			prev = strings.TrimSpace(strings.TrimPrefix(m.Conteudo, summaryPrefix))
+			lines = nil // the summary already covers what came before it
+		case m.Role == "user" && c != "":
+			lines = append(lines, "- user: "+clip(c, 1500))
+		case m.Role == "assistant" && c != "":
+			lines = append(lines, "- assistant: "+clip(c, 1500))
+		}
+	}
+	head := "The earlier history no longer fit the context window, so the guardrail replaced it with this " +
+		"mechanical state (tool calls and results omitted; use session_search / session_retrieve to recover them).\n"
+	if prev != "" {
+		head += "\n## Previous working state\n" + clip(prev, maxForcedState/2) + "\n"
+	}
+	const section = "\n## Conversation since then (oldest omitted if too long)\n"
+	room := maxForcedState - len(head) - len(section) - 1
+	var kept []string
+	for i := len(lines) - 1; i >= 0; i-- {
+		if room-len(lines[i])-1 < 0 {
+			break
+		}
+		room -= len(lines[i]) + 1
+		kept = append([]string{lines[i]}, kept...)
+	}
+	if len(kept) > 0 {
+		head += section + strings.Join(kept, "\n") + "\n"
+	}
+	return head
+}
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func historyBytes(h []dealer.Mensagem) int {

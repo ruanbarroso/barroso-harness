@@ -330,6 +330,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	toolTextRetries := 0
 	reactiveDone := false
 	compacted := false
+	forcedCompaction := false
 	// Whole-turn totals: each tool cycle spends request and response, and the
 	// UI footer shows the total, not the last cycle's. Same for the money cost:
 	// it restarts on every turn.
@@ -380,6 +381,33 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		ev := budget.Avaliar(string(body), s.config.Janela, s.est)
 		if !ev.Cabe {
 			pruned := prune(working, &floor, s.est.Bytes(ev.TokensEntrada+ev.TokensSaida-s.config.Janela))
+			if pruned == nil && !forcedCompaction {
+				// Pruning only stubs tool results; a history whose weight is
+				// in tool_call arguments, or one rehydrated in full by Resume
+				// (the in-memory stubs never reach the log), cannot be saved
+				// by it (conversation 100135, 2026-10-25: 324k real tokens in
+				// a 200k window after a process restart). Last resort: replace
+				// everything before the current request with a mechanical
+				// state, persisted so Resume re-applies it.
+				if state := forcedState(working); state != "" {
+					forcedCompaction = true
+					before := historyBytes(working)
+					working = compactHistory(working, state)
+					floor = 0
+					compacted = true
+					r.Guardrail(true)
+					s.record(eventCompaction, map[string]any{
+						"politica":     policy(s.config.PoliticaContexto),
+						"tipo":         "forcada",
+						"ciclo":        cycle,
+						"bytes_antes":  before,
+						"bytes_depois": historyBytes(working),
+						"estado_bytes": len(state),
+						"estado":       state,
+					})
+					continue
+				}
+			}
 			if pruned == nil {
 				return fmt.Errorf("guardrail: request does not fit (%s) and pruning did not free enough", ev.Veredito())
 			}
