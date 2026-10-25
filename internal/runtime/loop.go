@@ -36,7 +36,7 @@ func (g *loopGuard) observe(calls []dealer.ToolChamada) string {
 	for _, c := range calls {
 		names = append(names, c.Nome)
 	}
-	return fmt.Sprintf("[loop] You have made exactly the same call(s) (%s, same arguments) %d rounds in a row and got the same results. "+
+	return fmt.Sprintf(loopNoticePrefix+"You have made exactly the same call(s) (%s, same arguments) %d rounds in a row and got the same results. "+
 		"Repeating it will not change the outcome. Use what you already have, try a different approach or arguments, "+
 		"or answer the user with what you found and what is blocking you.", strings.Join(names, ", "), g.count)
 }

@@ -122,17 +122,33 @@ func isSummary(content string) bool {
 	return strings.HasPrefix(content, summaryPrefix) || strings.HasPrefix(content, legacySummaryPrefix)
 }
 
+// readImagesNote is the content of the user message the runtime adds after a
+// round whose read calls opened images (tool messages cannot carry images).
+const readImagesNote = "[images opened with read]"
+
+// loopNoticePrefix starts the steering notice of the loop guard.
+const loopNoticePrefix = "[loop] "
+
+// isSynthetic reports whether a user-role message was injected by the runtime
+// (image note, loop notice) rather than written by the user. Steer messages
+// are real user text and are not synthetic.
+func isSynthetic(content string) bool {
+	return content == readImagesNote || strings.HasPrefix(content, loopNoticePrefix)
+}
+
 // compactHistory replaces everything before the CURRENT request (the last real
 // user message) with a message carrying the state. The current request and
 // the ongoing round — with its tool_call/tool_result pairs — stay intact, so
-// the request remains valid for the provider.
+// the request remains valid for the provider. Summaries and the messages the
+// runtime injects with role "user" (isSynthetic) are not requests: cutting at
+// them threw the user's actual request away with the old history.
 //
 // With nothing before the current request there is nothing to compact and h
 // is returned unchanged.
 func compactHistory(h []dealer.Mensagem, state string) []dealer.Mensagem {
 	cut := -1
 	for i := len(h) - 1; i >= 0; i-- {
-		if h[i].Role == "user" && !isSummary(h[i].Conteudo) {
+		if h[i].Role == "user" && !isSummary(h[i].Conteudo) && !isSynthetic(h[i].Conteudo) {
 			cut = i
 			break
 		}

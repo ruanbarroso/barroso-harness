@@ -633,9 +633,8 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		// only names the file, and a user message right after the round's
 		// results carries it (tool messages cannot hold images).
 		if imgs := readImages(results); len(imgs) > 0 {
-			note := "[images opened with read]"
-			working = append(working, dealer.Mensagem{Role: "user", Conteudo: note, Images: imgs})
-			s.record("user_message", map[string]any{"role": "user", "content": note, "images": imgs})
+			working = append(working, dealer.Mensagem{Role: "user", Conteudo: readImagesNote, Images: imgs})
+			s.record("user_message", map[string]any{"role": "user", "content": readImagesNote, "images": imgs})
 		}
 		if notice := loop.observe(round.Tools); notice != "" {
 			// A nudge, not a stop: the turn keeps going, but the model is told it

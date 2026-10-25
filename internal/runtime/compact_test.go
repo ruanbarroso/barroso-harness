@@ -68,6 +68,34 @@ func TestCompactHistoryRecognizesLegacyMarker(t *testing.T) {
 	}
 }
 
+// Messages the runtime injects with role "user" (the image note after a read,
+// the loop notice) are not the user's request: compaction must not cut there,
+// or the real current request is thrown away with the old history.
+func TestCompactHistorySkipsSyntheticUserMessages(t *testing.T) {
+	for _, synthetic := range []string{
+		readImagesNote,
+		"[loop] You have made exactly the same call(s) (read, same arguments) 5 rounds in a row and got the same results.",
+	} {
+		h := []dealer.Mensagem{
+			{Role: "user", Conteudo: "old request"},
+			{Role: "assistant", Conteudo: "old answer"},
+			{Role: "user", Conteudo: "current request"},
+			{Role: "tool_call", ToolID: "r1", ToolName: "read", ToolArgs: `{"path":"a.png"}`},
+			{Role: "tool_result", ToolID: "r1", ToolName: "read", Conteudo: tools.ImageAttached + "a.png]\n"},
+			{Role: "user", Conteudo: synthetic, Images: []string{"a.png"}},
+			{Role: "tool_call", ToolID: "c1", ToolName: "context_compact", ToolArgs: `{"state":"x"}`},
+			{Role: "tool_result", ToolID: "c1", ToolName: "context_compact", Conteudo: "ok"},
+		}
+		out := compactHistory(h, "goal: X")
+		if len(out) != 7 || out[1].Conteudo != "current request" {
+			t.Fatalf("%q: the current request must survive compaction, got %+v", synthetic[:10], out)
+		}
+		if len(out[4].Images) != 1 {
+			t.Fatalf("the image note after the request must stay with its image: %+v", out[4])
+		}
+	}
+}
+
 func TestCompactedStateIgnoresFailedCall(t *testing.T) {
 	calls := []dealer.ToolChamada{{ID: "1", Nome: compactToolName, Args: `{"state":"good"}`}}
 	if e := compactedState(calls, []dealer.Mensagem{{IsErro: true}}); e != "" {
