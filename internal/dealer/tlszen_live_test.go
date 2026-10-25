@@ -11,7 +11,11 @@ func TestZenAoVivo(t *testing.T) {
 	if os.Getenv("ZEN_LIVE") != "1" {
 		t.Skip("ZEN_LIVE=1 to hit opencode.ai")
 	}
-	c := Novo(Config{BaseURL: "https://opencode.ai/zen/v1", Model: "big-pickle", APIKey: "public"}).ComConversa("live")
+	base := os.Getenv("ZEN_BASE")
+	if base == "" {
+		base = "https://opencode.ai/zen/v1"
+	}
+	c := Novo(Config{BaseURL: base, Model: "big-pickle", APIKey: "public"}).ComConversa("live")
 	r, err := c.Rodar("You are terse.", []Mensagem{{Role: "user", Conteudo: "reply only OK"}}, nil)
 	if err != nil {
 		t.Fatal(err)
