@@ -150,6 +150,32 @@ The runtime threads its session id in (`ComConversa`), the dealer handles the re
 
 Each compaction is stored in `sessions.db` with the policy that produced it, and `/context` (old alias `/contexto`) aggregates by policy (agent compactions, proactive guardrail, **reactive** guardrail — the sign that the policy came too late — and how much the history shrank). `/resume` and `session/load` re-apply the compaction, so the resumed session comes back with the state, not with the already-summarized conversation.
 
+## Prompt hooks
+
+`"prompt_hooks"` in `config.json` runs commands before every prompt of a persistent session and sends what they print to the model beside the prompt — e.g. a memory recall on every turn:
+
+```json
+"prompt_hooks": [
+  { "command": "python", "args": ["recall.py"], "timeout_segundos": 10 }
+]
+```
+
+- The contract is Claude Code's `UserPromptSubmit`, so the same script serves both: JSON on stdin (`hook_event_name`, `prompt`, `cwd`, `session_id`, `permission_mode`); on exit 0, stdout is `hookSpecificOutput.additionalContext` or plain text. There is no `transcript_path` (the history lives in SQLite).
+- `decision: "block"`, `continue: false` or exit 2 blocks the prompt: it is neither recorded nor sent, and the reason (or stderr) is shown.
+- Hooks run in parallel, keep the configuration order in the output and are capped at 10,000 chars in total. Any other failure, a missing command or the timeout (10 s by default) skips the hook; the turn goes on.
+- The context goes to the model in a `<hook-context>` block and stays in the history (it is resent on later turns until a compaction). Screen, session title, `/resume` and `session/load` show only what you typed.
+- A timeout kills the hook's whole process tree (process group on POSIX, Job Object on Windows), and on Windows no console window opens.
+
+## Parallel tool calls
+
+Some OpenAI-compatible gateways lose the arguments of parallel tool calls (the call arrives with `"arguments": ""`). The harness then tells the model the arguments were lost and asks it to repeat the call alone, instead of running the tool. To avoid the round trip, turn parallel calls off — preferably only for the provider that needs it:
+
+```json
+"providers": { "meu-gateway": { "base_url": "https://…/v1", "disable_parallel_tool_calls": true } }
+```
+
+A top-level `"disable_parallel_tool_calls": true` applies to every provider. Either way the request carries `parallel_tool_calls: false` (only when it carries tools); turns take more rounds.
+
 ## Search
 
 Search and fetch work out of the box, with **no account and no API key**.

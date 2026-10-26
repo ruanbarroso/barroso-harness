@@ -168,9 +168,10 @@ func (s *Session) rebuild() {
 	s.dealer = dealer.Novo(dealer.Config{
 		BaseURL: base, APIKey: key, Model: s.config.Model,
 		MaxTokens: s.config.MaxTokens, JanelaTokens: s.config.Janela,
-		Effort:    s.config.Effort,
-		FirstByte: secs(s.config.FirstByteSecs),
-		Idle:      secs(s.config.IdleSecs),
+		Effort:                   s.config.Effort,
+		DisableParallelToolCalls: s.config.ParallelToolCallsOff(),
+		FirstByte:                secs(s.config.FirstByteSecs),
+		Idle:                     secs(s.config.IdleSecs),
 	})
 }
 
@@ -300,8 +301,22 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		s.baroMD = &b
 	}
 	baroMD := *s.baroMD
+	// Prompt hooks (memory recall) run before anything is recorded: a blocked
+	// prompt leaves no user_message and never reaches the model. Their
+	// context travels in HookContext, apart from what the user typed: screens,
+	// titles and ACP replay read Conteudo, only the request joins the two.
+	if len(s.config.PromptHooks) > 0 && s.Persistente() {
+		if rd, ok := r.(RendererDetalhado); ok {
+			rd.Pensando()
+		}
+	}
+	hooks := s.promptHooks(ctx, cwd, prompt)
+	if hooks.Blocked {
+		return hooks.err()
+	}
+	hookCtx := hooks.Context
 	working := append([]dealer.Mensagem(nil), s.history...)
-	working = append(working, dealer.Mensagem{Role: "user", Conteudo: prompt, Images: images})
+	working = append(working, dealer.Mensagem{Role: "user", Conteudo: prompt, Images: images, HookContext: hookCtx})
 	// The turn is never thrown away. Whatever way Send exits from here on —
 	// final answer, provider error after the retries, timeout, cancellation,
 	// guardrail — the history keeps the user prompt and every round that
@@ -342,6 +357,9 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	userEvent := map[string]any{"role": "user", "content": prompt}
 	if len(images) > 0 {
 		userEvent["images"] = images
+	}
+	if hookCtx != "" {
+		userEvent["hook_context"] = hookCtx
 	}
 	s.record("user_message", userEvent)
 
@@ -899,10 +917,32 @@ func systemPrompt(cwd, baroMD string, canSpawn bool, now time.Time, deferred str
 func runTool(ctx context.Context, list []tools.Spec, cwd string, call dealer.ToolChamada) (string, error) {
 	for _, s := range list {
 		if s.Name == call.Nome {
-			return s.Exec(ctx, cwd, json.RawMessage(call.Args))
+			args := json.RawMessage(call.Args)
+			if t := strings.TrimSpace(call.Args); t == "" || t == "null" {
+				args = json.RawMessage("{}")
+			}
+			if miss := missingRequired(s.Schema, args); len(miss) > 0 {
+				return "", missingArgsErr(call.Nome, miss, call.Args)
+			}
+			return s.Exec(ctx, cwd, args)
 		}
 	}
 	return "", fmt.Errorf("unknown tool: %q (check the exact name)", call.Nome)
+}
+
+// missingArgsErr explains a call that arrived without its required
+// arguments. Some gateways drop the arguments of parallel calls, so the model
+// is told what reached the harness and how to retry, instead of a tool
+// error ("empty command") that reads as its own mistake.
+func missingArgsErr(name string, miss []string, raw string) error {
+	got := strings.TrimSpace(raw)
+	if got == "" {
+		got = "(empty)"
+	} else if len(got) > 200 {
+		got = got[:200] + "…"
+	}
+	return fmt.Errorf("%s needs %s, but the call arrived with arguments %s. If you did send them, they were lost on the way (some gateways drop the arguments of parallel calls): call %s again, alone in its response",
+		name, strings.Join(miss, ", "), got, name)
 }
 
 // Synthetic continuation messages after a cut. The "[output limit]" prefix
