@@ -31,7 +31,7 @@ func newTestACPFactory(t *testing.T) (func(config.Config) (acp.Turno, string), *
 	t.Cleanup(func() { _ = st.Fechar() })
 	var open []*wiring.Conjunto
 	return func(c config.Config) (acp.Turno, string) {
-		return newACPSession(c, st, t.TempDir(), &open)
+		return newACPSession(c, st, t.TempDir(), &open, nil)
 	}, st
 }
 
@@ -96,7 +96,7 @@ func TestNewACPSessionPersistsWhenStoreAvailable(t *testing.T) {
 func TestNewACPSessionWorksWithoutStore(t *testing.T) {
 	factory, _ := newTestACPFactory(t)
 	var open []*wiring.Conjunto
-	turn, id := newACPSession(config.Config{}, nil, t.TempDir(), &open)
+	turn, id := newACPSession(config.Config{}, nil, t.TempDir(), &open, nil)
 	if turn == nil {
 		t.Fatal("turn must not be nil without a store")
 	}
@@ -118,7 +118,7 @@ func TestLoadACPSessionReopensFromDatabase(t *testing.T) {
 		t.Fatalf("StoreEvent: %v", err)
 	}
 	var open []*wiring.Conjunto
-	turn, err := loadACPSession(config.Config{}, st, t.TempDir(), id, &open)
+	turn, err := loadACPSession(config.Config{}, st, t.TempDir(), id, &open, nil)
 	if err != nil {
 		t.Fatalf("loadACPSession: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestLoadACPSessionReopensFromDatabase(t *testing.T) {
 	if len(h) != 1 || h[0].Conteudo != "hello from before" {
 		t.Fatalf("history not rebuilt: %+v", h)
 	}
-	if _, err := loadACPSession(config.Config{}, st, t.TempDir(), "bh-does-not-exist", &open); err == nil {
+	if _, err := loadACPSession(config.Config{}, st, t.TempDir(), "bh-does-not-exist", &open, nil); err == nil {
 		t.Fatal("unknown id should return an error")
 	}
 }

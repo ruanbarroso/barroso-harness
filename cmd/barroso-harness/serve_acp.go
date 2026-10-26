@@ -15,6 +15,7 @@ import (
 	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
 	"github.com/ruanbarroso/barroso-harness/internal/store"
+	"github.com/ruanbarroso/barroso-harness/internal/subagent"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 	"github.com/ruanbarroso/barroso-harness/internal/update"
 	"github.com/ruanbarroso/barroso-harness/internal/wiring"
@@ -46,8 +47,11 @@ func serveACP() {
 	}()
 
 	var open []*wiring.Conjunto
+	// ag is assigned below; the closures only run after Handle starts.
+	var ag *acp.Agente
+	notices := func(id string, set *wiring.Conjunto) { wireSubagentNotices(ag, id, set) }
 	factory := func(c config.Config) (acp.Turno, string) {
-		return newACPSession(c, st, cwd, &open)
+		return newACPSession(c, st, cwd, &open, notices)
 	}
 	defer func() {
 		for _, set := range open {
@@ -55,9 +59,13 @@ func serveACP() {
 		}
 		tools.KillJobs() // background shell jobs die with the agent
 	}()
-	ag := acp.NovoComFabrica(cfg, factory).ComLog(func(line string) {
+	ag = acp.NovoComFabrica(cfg, factory).ComLog(func(line string) {
 		os.Stderr.WriteString(line + "\n")
 	})
+	// Sub-agent results go back to the client as a new turn of the parent
+	// (see internal/acp/subagent_notice.go): without this the children ran in
+	// -acp and their results were lost.
+	ag.HabilitarAvisosSubagentes()
 	// Auto-update, as in the REPL: agents run as `bh -acp` under a connector
 	// and nobody opens the interactive bh on that machine, so without this
 	// they stayed on the old release forever. This process keeps its version;
@@ -72,7 +80,7 @@ func serveACP() {
 	// loadSession=false.
 	if st != nil {
 		ag.Carregar = func(c config.Config, id string) (acp.Turno, error) {
-			return loadACPSession(c, st, cwd, id, &open)
+			return loadACPSession(c, st, cwd, id, &open, notices)
 		}
 	}
 	if err := ag.Handle(nil, os.Stdin, os.Stdout); err != nil {
@@ -95,7 +103,7 @@ func serveACP() {
 //
 // The wiring ctx is the process-lifetime one: sub-agents born from an ACP
 // turn must outlive it.
-func newACPSession(cfg config.Config, st *store.Store, cwd string, open *[]*wiring.Conjunto) (acp.Turno, string) {
+func newACPSession(cfg config.Config, st *store.Store, cwd string, open *[]*wiring.Conjunto, notices func(string, *wiring.Conjunto)) (acp.Turno, string) {
 	id := runtime.NovoSessaoID()
 	var sess *runtime.Session
 	if st != nil {
@@ -110,14 +118,37 @@ func newACPSession(cfg config.Config, st *store.Store, cwd string, open *[]*wiri
 	if open != nil {
 		*open = append(*open, set)
 	}
+	if notices != nil {
+		notices(id, set)
+	}
 	return sess, id
+}
+
+// wireSubagentNotices connects the session's sub-agent manager to the ACP
+// agent: each batch that finishes becomes a notice turn of that session.
+func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) {
+	if ag == nil || set == nil {
+		return
+	}
+	g := set.Gerente()
+	if g == nil {
+		return
+	}
+	fetch := func() (string, bool) {
+		ts := g.Terminadas()
+		if len(ts) == 0 {
+			return "", false
+		}
+		return subagent.AvisoTerminadas(ts, g.Ativas()), true
+	}
+	g.AoTerminar(func() { ag.AvisarSubagentes(id, fetch) })
 }
 
 // loadACPSession reopens a session from sessions.db for session/load: the
 // same session the REPL lists in /resume. An id the database does not know is
 // an error — creating an empty session with the requested id would make the
 // client believe it loaded a conversation that does not exist.
-func loadACPSession(cfg config.Config, st *store.Store, cwd, id string, open *[]*wiring.Conjunto) (acp.Turno, error) {
+func loadACPSession(cfg config.Config, st *store.Store, cwd, id string, open *[]*wiring.Conjunto, notices func(string, *wiring.Conjunto)) (acp.Turno, error) {
 	if st == nil {
 		return nil, store.ErrSessaoInexistente
 	}
@@ -134,6 +165,9 @@ func loadACPSession(cfg config.Config, st *store.Store, cwd, id string, open *[]
 	}
 	if open != nil {
 		*open = append(*open, set)
+	}
+	if notices != nil {
+		notices(id, set)
 	}
 	return sess, nil
 }

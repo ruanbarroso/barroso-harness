@@ -80,6 +80,16 @@ type session struct {
 	cwd    string
 	turn   Turno
 	cancel context.CancelFunc // nil while no turn is running
+	// idle is closed when the client turn (cancel) ends; nil while none runs.
+	idle chan struct{}
+
+	// Sub-agent notices (subagent_notice.go): the turn the agent started on
+	// its own, its end signal, the wake-up channel of the delivery loop and
+	// the source of the notice text.
+	autoCancel context.CancelFunc
+	autoIdle   chan struct{}
+	wake       chan struct{}
+	fetch      func() (string, bool)
 }
 
 // Agente is the ACP server. It is born with the config captured in Novo
@@ -102,6 +112,12 @@ type Agente struct {
 	// compaction: the client advertised clientCapabilities.session.compaction
 	// in initialize, so compaction_update may be sent (see Guardrail).
 	compaction atomic.Bool
+	// subNotices: the host delivers sub-agent notices (AvisarSubagentes), so
+	// initialize advertises barroso/subagentNotices.
+	subNotices atomic.Bool
+	// wire is the writer of the Handle loop, used by turns the agent starts on
+	// its own (sub-agent notices), which have no request to answer.
+	wire io.Writer
 
 	// Catalogo fetches the provider's model list for configOptions; nil =
 	// dealer.Modelos. A seam for tests.
@@ -169,6 +185,9 @@ func (a *Agente) Handle(ctx context.Context, r io.Reader, w io.Writer) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	a.mu.Lock()
+	a.wire = w
+	a.mu.Unlock()
 	sc := NovoScanner(r)
 	for sc.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -249,11 +268,15 @@ func (a *Agente) initialize(w io.Writer, req Request) error {
 	// Omitted or null means unsupported; {} advertises the whole contract.
 	sess, _ := p.ClientCapabilities["session"].(map[string]any)
 	a.compaction.Store(sess != nil && sess["compaction"] != nil)
+	caps := map[string]any{
+		"loadSession": a.Carregar != nil,
+	}
+	if a.subNotices.Load() {
+		caps["_meta"] = map[string]any{SubagentNoticesCap: true}
+	}
 	return a.respond(w, NovaResposta(req.ID, map[string]any{
-		"protocolVersion": v,
-		"agentCapabilities": map[string]any{
-			"loadSession": a.Carregar != nil,
-		},
+		"protocolVersion":   v,
+		"agentCapabilities": caps,
 		"authMethods": []any{},
 	}))
 }
@@ -338,7 +361,10 @@ func (a *Agente) loadSession(w io.Writer, req Request) error {
 	a.mu.Unlock()
 	var turn Turno
 	if ok {
-		if live.cancel != nil {
+		a.mu.Lock()
+		busy := live.cancel != nil || live.autoCancel != nil
+		a.mu.Unlock()
+		if busy {
 			return WriteError(w, req.ID, CodTurnoRodando, "turn in progress in this session")
 		}
 		turn = live.turn
@@ -465,6 +491,10 @@ func (a *Agente) prompt(ctx context.Context, w io.Writer, req Request) error {
 	// comes first.
 	tctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+	s.idle = make(chan struct{})
+	// A turn the agent started on its own (sub-agent notice) may be running:
+	// the client's prompt waits for it instead of being refused.
+	waitAuto := s.autoIdle
 	a.mu.Unlock()
 
 	rend := &acpRenderer{a: a, w: w, session: s.id}
@@ -475,11 +505,26 @@ func (a *Agente) prompt(ctx context.Context, w io.Writer, req Request) error {
 	stop := a.keepalive(rend, tctx)
 	go func() {
 		defer a.running.Done()
-		err := s.turn.Send(tctx, rend, s.cwd, promptText)
+		var err error
+		if waitAuto != nil {
+			select {
+			case <-waitAuto:
+			case <-tctx.Done():
+				err = tctx.Err()
+			}
+		}
+		if err == nil {
+			err = s.turn.Send(tctx, rend, s.cwd, promptText)
+		}
 		stop()
 		a.mu.Lock()
 		s.cancel = nil
+		idle := s.idle
+		s.idle = nil
 		a.mu.Unlock()
+		if idle != nil {
+			close(idle)
+		}
 		cancel()
 		if err != nil {
 			a.respond(w, NovoErro(req.ID, CodErroAgente, errorMessage(err)))
@@ -550,9 +595,15 @@ func (a *Agente) cancel(w io.Writer, req Request) error {
 	}
 	a.mu.Lock()
 	c := s.cancel
+	auto := s.autoCancel
 	a.mu.Unlock()
-	if c != nil {
-		c()
+	if auto != nil {
+		auto()
+	}
+	if c != nil || auto != nil {
+		if c != nil {
+			c()
+		}
 		a.logf("acp: cancellation requested for session %s", s.id)
 	} else {
 		a.logf("acp: cancellation with no in-flight turn in session %s", s.id)
