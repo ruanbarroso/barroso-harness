@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
@@ -47,7 +48,33 @@ const (
 
 	// TetoTranscript caps the number of tool-trace lines per task.
 	TetoTranscript = 200
+	// TetoConversa caps the number of activity entries kept per task.
+	TetoConversa = 300
+	// TetoTextoConversa bounds each captured activity body.
+	TetoTextoConversa = 16 << 10
 )
+
+const (
+	EventoPensamento = "thinking"
+	EventoNota       = "note"
+	EventoResposta   = "assistant"
+	EventoToolCall   = "tool_call"
+	EventoSistema    = "system"
+)
+
+// Evento is one visible part of a sub-agent's conversation. Tool calls and
+// results are separate, so the UI can show a call while its tool is still
+// running, then update it when the result arrives.
+type Evento struct {
+	ID         string
+	Tipo       string
+	Nome       string
+	Args       string
+	Texto      string
+	Duracao    time.Duration
+	Erro       bool
+	Executando bool
+}
 
 // Task states.
 const (
@@ -87,11 +114,17 @@ type Tarefa struct {
 	cancel     context.CancelFunc
 	ctx        context.Context // child session; born together with the (ctx, cancel) pair
 	transcript []string
+	conversa   []Evento
 }
 
 // Transcricao returns a copy of the tool trace (observability/tests).
 func (t *Tarefa) Transcricao() []string {
 	return append([]string(nil), t.transcript...)
+}
+
+// Conversa returns a copy of the captured conversation activity.
+func (t *Tarefa) Conversa() []Evento {
+	return append([]Evento(nil), t.conversa...)
 }
 
 // collector is a sub-agent's runtime.Renderer: it draws nothing, it only
@@ -114,6 +147,7 @@ func (c *collector) Resposta(text string) {
 	c.g.mu.Lock()
 	defer c.g.mu.Unlock()
 	c.t.appendResult(text)
+	c.t.appendConversa(Evento{Tipo: EventoResposta, Texto: text})
 }
 
 func (c *collector) Tool(name string, _ time.Duration, isErr bool) {
@@ -126,8 +160,83 @@ func (c *collector) Tool(name string, _ time.Duration, isErr bool) {
 	c.t.appendTranscript(line)
 }
 
+// Optional renderer callbacks retain the same milestones and tool payloads
+// the parent's full-screen transcript displays.
+func (c *collector) Pensando()    {}
+func (c *collector) Contexto(int) {}
+func (c *collector) Pensou(text string, dur time.Duration) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	c.t.appendConversa(Evento{Tipo: EventoPensamento, Texto: text, Duracao: dur})
+}
+func (c *collector) Nota(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	c.t.appendConversa(Evento{Tipo: EventoNota, Texto: text})
+}
+func (c *collector) ToolComecou(id, name, args string) {
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	c.t.appendConversa(Evento{ID: id, Tipo: EventoToolCall, Nome: name, Args: args, Executando: true})
+}
+func (c *collector) ToolSaida(id, chunk string) {
+	if chunk == "" {
+		return
+	}
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	for i := len(c.t.conversa) - 1; i >= 0; i-- {
+		if c.t.conversa[i].ID == id && c.t.conversa[i].Tipo == EventoToolCall {
+			c.t.conversa[i].Texto = limitConversationText(c.t.conversa[i].Texto + chunk)
+			return
+		}
+	}
+}
+func (c *collector) ToolTerminou(id, name, args, output string, dur time.Duration, failed bool) {
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	line := "[tool " + name + "]"
+	if failed {
+		line = "[tool " + name + " error]"
+	}
+	c.t.appendTranscript(line)
+	for i := len(c.t.conversa) - 1; i >= 0; i-- {
+		e := &c.t.conversa[i]
+		if e.ID == id && e.Tipo == EventoToolCall {
+			e.Nome, e.Args, e.Texto = name, args, limitConversationText(output)
+			e.Duracao, e.Erro, e.Executando = dur, failed, false
+			return
+		}
+	}
+}
+func (c *collector) Guardrail(proactive bool) {
+	text := "Context compacted"
+	if proactive {
+		text = "Context compacted proactively"
+	}
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	c.t.appendConversa(Evento{Tipo: EventoSistema, Texto: text})
+}
+func (c *collector) Cortada(limit int, gaveUp bool) {
+	text := fmt.Sprintf("Response cut at the output limit (%d tokens)", limit)
+	if gaveUp {
+		text += "; stopped"
+	} else {
+		text += "; continuing"
+	}
+	c.g.mu.Lock()
+	defer c.g.mu.Unlock()
+	c.t.appendConversa(Evento{Tipo: EventoSistema, Texto: text})
+}
+
 func (c *collector) Eco(string)                           {}
-func (c *collector) Guardrail(bool)                       {}
 func (c *collector) Tokens(int, int, time.Duration, bool) {}
 
 // Gerente registers and runs the sibling tasks. Thread-safe: the caller
@@ -205,10 +314,7 @@ func (g *Gerente) Terminadas() []Tarefa {
 			continue
 		}
 		g.delivered[id] = true
-		cp := *t
-		cp.transcript = append([]string(nil), t.transcript...)
-		cp.cancel, cp.ctx = nil, nil
-		out = append(out, cp)
+		out = append(out, copyTask(t))
 	}
 	return out
 }
@@ -303,10 +409,7 @@ func (g *Gerente) Fotos() []Tarefa {
 		if t == nil {
 			continue
 		}
-		cp := *t
-		cp.transcript = append([]string(nil), t.transcript...)
-		cp.cancel, cp.ctx = nil, nil
-		out = append(out, cp)
+		out = append(out, copyTask(t))
 	}
 	return out
 }
@@ -320,9 +423,15 @@ func (g *Gerente) snapshot(id string) (Tarefa, bool) {
 	if !ok || t == nil {
 		return Tarefa{}, false
 	}
+	return copyTask(t), true
+}
+
+func copyTask(t *Tarefa) Tarefa {
 	cp := *t
 	cp.transcript = append([]string(nil), t.transcript...)
-	return cp, true
+	cp.conversa = append([]Evento(nil), t.conversa...)
+	cp.cancel, cp.ctx = nil, nil
+	return cp
 }
 
 // finish closes a task's lifecycle (called under the manager lock). An empty
@@ -364,6 +473,27 @@ func (t *Tarefa) appendTranscript(line string) {
 		return
 	}
 	t.transcript = append(t.transcript, line)
+}
+
+func (t *Tarefa) appendConversa(event Evento) {
+	if len(t.conversa) >= TetoConversa {
+		return
+	}
+	event.Nome = limitConversationText(event.Nome)
+	event.Args = limitConversationText(event.Args)
+	event.Texto = limitConversationText(event.Texto)
+	t.conversa = append(t.conversa, event)
+}
+
+func limitConversationText(text string) string {
+	if len(text) <= TetoTextoConversa {
+		return text
+	}
+	text = text[:TetoTextoConversa]
+	for !utf8.ValidString(text) {
+		text = text[:len(text)-1]
+	}
+	return text + "… (truncated)"
 }
 
 // Spawn creates a task and hands it to the runner. The prompt goes to the

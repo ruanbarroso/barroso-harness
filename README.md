@@ -52,7 +52,9 @@ In-session commands:
 /new                   clears the session transcript (new conversation, config intact)
 /update                downloads and installs the newest release from the channel
 /skills                lists the skills; /<name> [args] runs one
-/tasks                 lists the sub-agents; /tasks <id> shows details; /tasks cancel <id>
+/tasks                 lists the sub-agents; in the full-screen TUI (also ctrl+x a) choosing one opens its live conversation
+                       (thoughts, tool calls and output, final answer; tab switches, j/k/pgup/pgdn scroll);
+                       /tasks <id> prints it, /tasks cancel <id> cancels
 /context               active compaction policy and what each one has done
 /help
 /exit                  also /quit

@@ -78,18 +78,57 @@ func showTask(out io.Writer, ts []subagent.Tarefa, id string) {
 		}
 		fmt.Fprintf(out, "%s %s %s\n", cyanf(t.ID), stateColor(t.Estado), dimf(taskDuration(t)))
 		fmt.Fprintln(out, dimf("prompt: ")+t.Prompt)
-		for _, l := range t.Transcricao() {
-			fmt.Fprintln(out, dimf("  "+l))
+		if events := t.Conversa(); len(events) > 0 {
+			printTaskConversation(out, events)
+		} else {
+			// Older task snapshots (or tasks created before conversation capture)
+			// still have the concise trace and final result.
+			for _, l := range t.Transcricao() {
+				fmt.Fprintln(out, dimf("  "+l))
+			}
+			if t.Resultado != "" {
+				fmt.Fprintln(out, t.Resultado)
+			}
 		}
 		if t.Erro != "" {
 			fmt.Fprintln(out, redf("error: ")+t.Erro)
 		}
-		if t.Resultado != "" {
-			fmt.Fprintln(out, t.Resultado)
-		}
 		return
 	}
 	warnFmt(out, "task "+id+" does not exist (/tasks lists them)")
+}
+
+// printTaskConversation writes the same ordered activity the full-screen
+// inspector exposes: thoughts, intermediate notes, tool calls/results and text.
+func printTaskConversation(out io.Writer, events []subagent.Evento) {
+	for _, e := range events {
+		switch e.Tipo {
+		case subagent.EventoPensamento:
+			fmt.Fprintln(out, dimf("+ Thought"), dimf("· "+e.Duracao.Round(100*time.Millisecond).String()))
+			printIndented(out, e.Texto, "  ")
+		case subagent.EventoNota:
+			printIndented(out, e.Texto, "  ")
+		case subagent.EventoToolCall:
+			_, label := toolLabel(e.Nome, e.Args, e.Texto, false)
+			if e.Executando {
+				label = "⠋ " + label
+			}
+			fmt.Fprintln(out, dimf("  "+label))
+			if e.Texto != "" {
+				printIndented(out, e.Texto, "    ")
+			}
+		case subagent.EventoResposta:
+			printIndented(out, e.Texto, "")
+		case subagent.EventoSistema:
+			fmt.Fprintln(out, yellowf("  "+e.Texto))
+		}
+	}
+}
+
+func printIndented(out io.Writer, text, prefix string) {
+	for _, line := range strings.Split(cleanOutput(text), "\n") {
+		fmt.Fprintln(out, prefix+line)
+	}
 }
 
 func stateColor(e string) string {

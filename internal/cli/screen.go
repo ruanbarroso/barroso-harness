@@ -177,6 +177,9 @@ type screen struct {
 	hoverItem    int
 	rowOwner     []int
 	pendingCmd   string
+	// pendingTaskID is a sub-agent a click asked to inspect: the key loop opens
+	// its conversation dialog.
+	pendingTaskID string
 	// mcpOpen is the sidebar's MCP collapse state (open by default).
 	mcpOpen bool
 	// wasHome is whether the last frame was the home screen.
@@ -1036,6 +1039,20 @@ func (t *screen) footerParts(w int) (string, string) {
 	usage := ""
 	if t.state.ctxTokens > 0 {
 		usage = fmtContext(t.state.ctxTokens, t.state.window)
+	}
+	// Running sub-agents, like OpenCode's "N subagents" footer entry.
+	live := 0
+	for _, tk := range t.src.tasks() {
+		if tk.TerminadaEm.IsZero() {
+			live++
+		}
+	}
+	if live > 0 {
+		label := fmt.Sprintf("%d subagent", live)
+		if live > 1 {
+			label += "s"
+		}
+		left += "  " + grayf("ctrl+x a ") + color(colorText, label)
 	}
 	// OpenCode's fit rule: available = (W-8) - min(28, (W-8)/2).
 	available := max(0, w-8-min(28, (w-8)/2))

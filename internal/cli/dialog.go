@@ -59,12 +59,17 @@ type dialog struct {
 	title, placeholder string
 	size               int
 	items              []dialogItem
-	text               []string // read-only body (help, context)
+	text               []string // read-only body (help, context, sub-agent conversation)
 	prompt             bool     // a single text field (rename)
 	query              []rune
 	sel, off           int
 	loading            bool
 	errText            string
+	// taskID marks the live sub-agent inspector: its body is rebuilt on every
+	// frame while the task runs (tab/shift+tab cycles to the next one), so the
+	// dialog the key/mouse model opens stays a read-only text panel.
+	taskID    string
+	taskLines int
 	// choose runs for the chosen row; submit for a prompt's text. Both return a
 	// slash command for the REPL, or "" when the dialog handled it itself.
 	choose func(t *screen, it dialogItem) string
@@ -126,7 +131,7 @@ func (s *dialogSource) sessions() []sessionRow {
 }
 
 func (s *dialogSource) tasks() []subagent.Tarefa {
-	if s.gerente == nil {
+	if s == nil || s.gerente == nil {
 		return nil
 	}
 	return s.gerente.Fotos()
@@ -381,7 +386,66 @@ func (t *screen) openTasksDialog() {
 		}
 	}
 	t.openDialog(&dialog{title: "Sub-agents", placeholder: "Search", size: dialogWide, items: items,
-		choose: func(t *screen, it dialogItem) string { return "/tasks " + it.value }})
+		choose: func(t *screen, it dialogItem) string {
+			t.openSubagentDialog(it.value)
+			return ""
+		}})
+}
+
+// openSubagentDialog opens the live conversation of one sub-agent (OpenCode's
+// subagent inspector): the body is rebuilt on every frame while the task runs.
+func (t *screen) openSubagentDialog(id string) {
+	d := &dialog{title: "Subagent " + id, size: dialogWide, taskID: id}
+	t.updateSubagentDialog(d)
+	t.openDialog(d)
+}
+
+// updateSubagentDialog refreshes the inspector from the manager's snapshot and
+// keeps the view pinned to the bottom while the user has not scrolled away.
+func (t *screen) updateSubagentDialog(d *dialog) {
+	if d == nil || d.taskID == "" {
+		return
+	}
+	for _, task := range t.src.tasks() {
+		if task.ID != d.taskID {
+			continue
+		}
+		status := task.Estado
+		if !task.Inicada.IsZero() {
+			status += " · " + taskDuration(&task)
+		}
+		d.title = "Subagent " + task.ID + " · " + status
+		width := max(20, min(d.size, max(20, t.w-2))-8)
+		maxRows := max(3, t.h/2-6)
+		atBottom := d.off >= max(0, d.taskLines-maxRows)
+		d.text = subagentConversationLines(task, width)
+		if atBottom {
+			d.off = max(0, len(d.text)-maxRows)
+		}
+		d.taskLines = len(d.text)
+		return
+	}
+	d.title = "Subagent " + d.taskID
+	d.text = []string{"Sub-agent not found"}
+	d.taskLines = len(d.text)
+}
+
+// cycleSubagentDialog moves the inspector to the next/previous task (tab).
+func (t *screen) cycleSubagentDialog(d *dialog, direction int) {
+	tasks := t.src.tasks()
+	if d == nil || d.taskID == "" || len(tasks) < 2 {
+		return
+	}
+	index := 0
+	for i := range tasks {
+		if tasks[i].ID == d.taskID {
+			index = i
+			break
+		}
+	}
+	d.taskID = tasks[(index+direction+len(tasks))%len(tasks)].ID
+	d.off = 0
+	t.updateSubagentDialog(d)
 }
 
 // openMCPDialog shows the MCP servers and their real status. Read-only: the
@@ -495,14 +559,18 @@ func (t *screen) dialogKey(k keyEvent) string {
 	}
 	if d.text != nil {
 		switch name {
-		case keyUp, "ctrl+p":
+		case keyUp, "ctrl+p", "k":
 			d.off = max(0, d.off-1)
-		case keyDown, "ctrl+n":
+		case keyDown, "ctrl+n", "j":
 			d.off++
 		case "pgup":
 			d.off = max(0, d.off-10)
 		case "pgdn":
 			d.off += 10
+		case "tab":
+			t.cycleSubagentDialog(d, 1)
+		case "shift+tab":
+			t.cycleSubagentDialog(d, -1)
 		case keyEnter:
 			t.closeDialog()
 		}
@@ -643,6 +711,9 @@ func dimFrame(s string) string {
 // for the cursor (the search field), or row 0 for none.
 func (t *screen) drawDialog(sb *strings.Builder) (int, int) {
 	d := t.dlg
+	if d.taskID != "" {
+		t.updateSubagentDialog(d)
+	}
 	width := min(d.size, t.w-2)
 	left := (t.w-width)/2 + 1
 	top := t.h/4 + 1

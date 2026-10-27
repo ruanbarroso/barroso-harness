@@ -36,7 +36,7 @@ func commands() []command {
 		{name: "/rename", usage: "/rename <name>", cat: "Session", desc: "rename the current session (tab and panel)", key: "ctrl+r", dialog: true},
 		{name: "/context", usage: "/context", cat: "Session", desc: "active compaction policy and what it has done", dialog: true},
 		{name: "/skills", usage: "/skills", cat: "Agents", desc: "list skills; /<name> [args] runs one", dialog: true},
-		{name: "/tasks", usage: "/tasks [id|cancel id]", cat: "Agents", desc: "list sub-agents, show one, cancel one", dialog: true},
+		{name: "/tasks", usage: "/tasks [id|cancel id]", cat: "Agents", desc: "view sub-agent conversations, cancel one", key: "ctrl+x a", dialog: true},
 		{name: "/mcps", usage: "/mcps", cat: "Agents", desc: "MCP servers and their status", dialog: true},
 		{name: "/update", usage: "/update", cat: "System", desc: "download and install the latest release", dialog: true},
 		{name: "/help", usage: "/help", cat: "System", desc: "this help", dialog: true},

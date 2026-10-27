@@ -140,7 +140,7 @@ func (t *screen) itemAction(it *item) func() {
 	case "user":
 		return func() { t.openMessageDialog(it) }
 	case "sub":
-		return func() { t.pendingCmd = "/tasks " + it.taskID }
+		return func() { t.pendingTaskID = it.taskID }
 	case "group":
 		if len(it.members) == 1 {
 			return func() { t.toggle(it.members[0]) }

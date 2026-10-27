@@ -202,6 +202,25 @@ func TestSpawnRunsAndResultReturnsWithoutDelegationTools(t *testing.T) {
 	if len(cp.Transcricao()) != 1 || !strings.Contains(cp.Transcricao()[0], "list") {
 		t.Fatalf("tool trace should contain list: %v", cp.Transcricao())
 	}
+	events := cp.Conversa()
+	if len(events) < 2 || events[0].Tipo != EventoToolCall || events[len(events)-1].Tipo != EventoResposta {
+		t.Fatalf("conversation should contain the tool call and the final answer: %+v", events)
+	}
+	call := events[0]
+	if call.Nome != "list" || call.Erro || call.Texto == "" {
+		t.Fatalf("the finished tool call should carry its result: %+v", call)
+	}
+	if call.Executando {
+		t.Fatalf("a finished tool call must not stay marked as running: %+v", call)
+	}
+	if events[len(events)-1].Texto != "task done" {
+		t.Fatalf("assistant event lost the final text: %+v", events[len(events)-1])
+	}
+	// Snapshots do not share the event slice with the running task.
+	events[0].Nome = "changed"
+	if g.Fotos()[0].Conversa()[0].Nome != "list" {
+		t.Fatal("task conversation snapshot aliases internal storage")
+	}
 
 	// Result through the tool.
 	res, err := runTool(t, byName["task_result"], fmt.Sprintf(`{"id":%q}`, id))

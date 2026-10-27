@@ -158,8 +158,8 @@ func TestSubagentRows(t *testing.T) {
 		t.Fatalf("rows:\n%s", txt)
 	}
 	clickItem(t, sc, "sub")
-	if sc.pendingCmd != "/tasks t1" {
-		t.Fatalf("pending = %q", sc.pendingCmd)
+	if sc.pendingTaskID != "t1" {
+		t.Fatalf("pending task id = %q", sc.pendingTaskID)
 	}
 }
 
