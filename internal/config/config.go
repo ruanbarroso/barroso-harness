@@ -89,11 +89,11 @@ type Config struct {
 	JanelaSource    string               `json:"context_window_source,omitempty"` // FonteCatalogo | FonteManual | ""
 	MaxTokens       int                  `json:"max_tokens"`                      // reserved for the provider; 0 = dealer default
 	BytesPorToken   int                  `json:"bytes_per_token"`                 // manual calibration; 0 = default estimator (4)
-	// Provider watchdog, in seconds. Absent = dealer default (150 s to the
-	// first byte, 300 s of stream silence); 0 = disabled. There is no total
-	// deadline by design — only silence is bounded.
-	FirstByteSecs *int   `json:"provider_first_byte_secs,omitempty"`
-	IdleSecs      *int   `json:"provider_idle_secs,omitempty"`
+	// Provider response deadline, in seconds of silence counted from the
+	// request being sent. Absent = dealer default (300 s); 0 = disabled. There
+	// is no first-byte deadline and no total deadline by design. An old
+	// provider_first_byte_secs key in config.json is ignored.
+	IdleSecs *int `json:"provider_idle_secs,omitempty"`
 	BaseURL       string `json:"-"` // resolved from the active provider
 	APIKey        string `json:"-"` // resolved from the active provider; never log
 	Home          string `json:"-"`

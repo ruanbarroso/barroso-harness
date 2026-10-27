@@ -170,7 +170,6 @@ func (s *Session) rebuild() {
 		MaxTokens: s.config.MaxTokens, JanelaTokens: s.config.Janela,
 		Effort:                   s.config.Effort,
 		DisableParallelToolCalls: s.config.ParallelToolCallsOff(),
-		FirstByte:                secs(s.config.FirstByteSecs),
 		Idle:                     secs(s.config.IdleSecs),
 	})
 }

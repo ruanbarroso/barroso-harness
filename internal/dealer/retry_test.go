@@ -17,10 +17,10 @@ const okStream = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata
 // shrink makes the deadlines and backoff test-sized.
 func shrink(t *testing.T) {
 	t.Helper()
-	fb, idle, base, bmax := firstByteTimeout, idleTimeout, backoffBase, backoffMax
-	firstByteTimeout, idleTimeout = 200*time.Millisecond, 200*time.Millisecond
+	idle, base, bmax := idleTimeout, backoffBase, backoffMax
+	idleTimeout = 200 * time.Millisecond
 	backoffBase, backoffMax = 5*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { firstByteTimeout, idleTimeout, backoffBase, backoffMax = fb, idle, base, bmax })
+	t.Cleanup(func() { idleTimeout, backoffBase, backoffMax = idle, base, bmax })
 }
 
 // The 22/10 case: 503 "No server is available" once, then the provider is
@@ -54,9 +54,9 @@ func TestRetry503ThenOK(t *testing.T) {
 	}
 }
 
-// A provider that accepts and never answers must fail within the deadline,
-// retried, and the final error says why.
-func TestFirstByteTimeoutGivesUp(t *testing.T) {
+// A provider that accepts and never answers must fail within the response
+// deadline, retried, and the final error says why.
+func TestSilentProviderGivesUp(t *testing.T) {
 	shrink(t)
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +67,7 @@ func TestFirstByteTimeoutGivesUp(t *testing.T) {
 	defer srv.Close()
 	start := time.Now()
 	_, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
-	if err == nil || !errors.Is(err, errFirstByte) || !strings.Contains(err.Error(), "gave up after 2 attempts") {
+	if err == nil || !errors.Is(err, errIdle) || !strings.Contains(err.Error(), "gave up after 2 attempts") {
 		t.Fatalf("err %v", err)
 	}
 	if n.Load() != int32(maxTimeoutAttempts) {

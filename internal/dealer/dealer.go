@@ -38,9 +38,8 @@ type Config struct {
 	// DisableParallelToolCalls sends parallel_tool_calls=false: one tool call
 	// per response, for gateways that drop arguments in parallel batches.
 	DisableParallelToolCalls bool `json:"disable_parallel_tool_calls,omitempty"`
-	// Watchdog overrides: nil = package default, ≤0 = disabled.
-	FirstByte *time.Duration `json:"-"`
-	Idle      *time.Duration `json:"-"`
+	// Response deadline override: nil = package default, ≤0 = disabled.
+	Idle *time.Duration `json:"-"`
 }
 
 // Usage is the provider's token usage.
@@ -477,7 +476,7 @@ type sseChunk struct {
 
 // RodarContext is Rodar with real cancellation: the request and the stream
 // read abort when ctx expires or is canceled (the REPL uses Ctrl+C). Silence
-// is bounded by firstByteTimeout/idleTimeout and transient failures are
+// is bounded by idleTimeout and transient failures are
 // retried (retry.go).
 func (c *Cliente) RodarContext(ctx context.Context, system string, msgs []Mensagem, tools []map[string]any) (*Rodada, error) {
 	if ctx == nil {
@@ -502,7 +501,7 @@ func (c *Cliente) Rodar(system string, msgs []Mensagem, tools []map[string]any) 
 // tentativa is one attempt: one POST and the read of its stream, under the
 // watchdog.
 func (c *Cliente) tentativa(ctx context.Context, body []byte) (*Rodada, error) {
-	wctx, wd := newWatchdog(ctx, pick(c.cfg.FirstByte, firstByteTimeout), pick(c.cfg.Idle, idleTimeout))
+	wctx, wd := newWatchdog(ctx, pick(c.cfg.Idle, idleTimeout))
 	defer wd.stop()
 	endpoint := NormalizarURL(c.cfg.BaseURL) + "/chat/completions"
 	req, err := http.NewRequestWithContext(wctx, "POST", endpoint, bytes.NewReader(body))

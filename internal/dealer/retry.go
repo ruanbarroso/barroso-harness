@@ -4,7 +4,7 @@ package dealer
 // 15-minute http.Client timeout: a provider that accepted the connection and
 // went quiet held the turn longer than the ACP connector waits (10 min), so
 // the session/prompt never got an answer. Now silence has its own deadlines
-// (first byte, then between chunks) and transient failures are retried with
+// (one response deadline, from the send) and transient failures are retried with
 // backoff before the error goes up.
 //
 // Retrying a round mid-stream is safe: the dealer only hands the Rodada over
@@ -27,11 +27,13 @@ import (
 
 // Variables, not constants, so tests can shrink them.
 var (
-	// firstByteTimeout bounds the wait for the response headers and the first
-	// SSE line. barroso-chat has measured TTFTs of 70 s, and every harness
-	// surveyed keeps this generous (Gemini 60 s, OpenCode 5 min).
-	firstByteTimeout = 150 * time.Second
-	// idleTimeout bounds the silence between two lines of an open stream. A
+	// idleTimeout is the only response deadline: how long the provider may
+	// stay silent, counted from the moment the request goes out (so it also
+	// covers the wait for headers and the first line) and re-armed after every
+	// line of the stream. There is deliberately NO separate first-byte
+	// deadline: on a big context the first byte takes minutes (139 s measured
+	// on 2026-10-27) and cutting it only restarted the same wait on a retry.
+	// A
 	// reasoning model can go quiet for minutes mid-thought: the survey found
 	// 300 s (Codex, Gemini), 120 s (Crush, Goose) and 15 min (OpenCode, because
 	// DeepSeek asked for it). Below ~2 min you cut working models.
@@ -51,8 +53,7 @@ var (
 )
 
 var (
-	errFirstByte = errors.New("no response from the provider")
-	errIdle      = errors.New("provider stream stalled")
+	errIdle = errors.New("no response from the provider")
 )
 
 // AvisoRetry is called before each new attempt: which attempt comes next, the
@@ -85,7 +86,7 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("provider HTTP %d: %s", e.status, e.summary)
 }
 
-// stallError is a first-byte or idle deadline that fired.
+// stallError is the response (idle) deadline firing.
 type stallError struct {
 	kind  error
 	after time.Duration
@@ -253,8 +254,8 @@ func (c *Cliente) comRetry(ctx context.Context, once func(context.Context) (*Rod
 	return nil, err
 }
 
-// watchdog cancels the request when the provider stays silent: firstByte
-// until the first line arrives, then idle between lines. Kick after each line.
+// watchdog cancels the request when the provider stays silent for idle,
+// counted from the request being sent. Kick after each line.
 type watchdog struct {
 	cancel context.CancelCauseFunc
 	timer  *time.Timer
@@ -269,15 +270,11 @@ func pick(override *time.Duration, def time.Duration) time.Duration {
 	return def
 }
 
-// newWatchdog arms the first-byte timer; a bound ≤0 is disabled.
-func newWatchdog(ctx context.Context, firstByte, idle time.Duration) (context.Context, *watchdog) {
+// newWatchdog arms the response timer right away; a bound ≤0 is disabled.
+func newWatchdog(ctx context.Context, idle time.Duration) (context.Context, *watchdog) {
 	wctx, cancel := context.WithCancelCause(ctx)
 	w := &watchdog{cancel: cancel, idle: idle}
-	if firstByte > 0 {
-		w.timer = time.AfterFunc(firstByte, func() {
-			cancel(&stallError{kind: errFirstByte, after: firstByte})
-		})
-	}
+	w.arm()
 	return wctx, w
 }
 
@@ -285,6 +282,10 @@ func (w *watchdog) kick() {
 	if w.timer != nil {
 		w.timer.Stop()
 	}
+	w.arm()
+}
+
+func (w *watchdog) arm() {
 	if w.idle <= 0 {
 		w.timer = nil
 		return
