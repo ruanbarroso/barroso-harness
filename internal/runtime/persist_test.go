@@ -213,7 +213,7 @@ func TestResumeRebuildsTranscript(t *testing.T) {
 			"role": "tool_result", "tool_id": "call_1", "tool_name": "read",
 			"content": "1: content",
 		}},
-		{"assistant", map[string]any{"role": "assistant", "content": "done, read it"}},
+		{"assistant", map[string]any{"role": "assistant", "content": "done, read it", "responses_output": []json.RawMessage{json.RawMessage(`{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}`)}}},
 	}
 	for _, e := range events {
 		s.record(e.kind, e.payload)
@@ -239,6 +239,9 @@ func TestResumeRebuildsTranscript(t *testing.T) {
 	}
 	if h[3].Role != "assistant" || h[3].Conteudo != "done, read it" {
 		t.Fatalf("final assistant wrong: %+v", h[3])
+	}
+	if len(h[3].ResponsesOutput) != 1 || string(h[3].ResponsesOutput[0]) != `{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}` {
+		t.Fatalf("Responses output wasn't resumed intact: %+v", h[3].ResponsesOutput)
 	}
 }
 

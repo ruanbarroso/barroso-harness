@@ -230,6 +230,9 @@ func historyBytes(h []dealer.Mensagem) int {
 	n := 0
 	for _, m := range h {
 		n += len(m.Conteudo) + len(m.HookContext) + len(m.ToolArgs)
+		for _, item := range m.ResponsesOutput {
+			n += len(item)
+		}
 	}
 	return n
 }

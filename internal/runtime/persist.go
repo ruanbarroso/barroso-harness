@@ -145,20 +145,22 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 			continue
 		}
 		var p struct {
-			Role     string   `json:"role"`
-			Content  string   `json:"content"`
-			ToolID   string   `json:"tool_id"`
-			ToolName string   `json:"tool_name"`
-			ToolArgs string   `json:"tool_args"`
-			IsErro   bool     `json:"is_erro"`
-			Blob     string   `json:"blob"`
-			Preview  string   `json:"preview"`
-			Images   []string `json:"images"`
-			HookCtx  string   `json:"hook_context"`
-			Usage    *struct {
-				PromptTokens int `json:"prompt_tokens"`
-				OutputTokens int `json:"output_tokens"`
-				CachedTokens int `json:"cached_tokens"`
+			Role            string            `json:"role"`
+			Content         string            `json:"content"`
+			ToolID          string            `json:"tool_id"`
+			ToolName        string            `json:"tool_name"`
+			ToolArgs        string            `json:"tool_args"`
+			IsErro          bool              `json:"is_erro"`
+			Blob            string            `json:"blob"`
+			Preview         string            `json:"preview"`
+			Images          []string          `json:"images"`
+			HookCtx         string            `json:"hook_context"`
+			ResponsesOutput []json.RawMessage `json:"responses_output"`
+			Usage           *struct {
+				PromptTokens    int `json:"prompt_tokens"`
+				OutputTokens    int `json:"output_tokens"`
+				CachedTokens    int `json:"cached_tokens"`
+				ReasoningTokens int `json:"reasoning_tokens"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(e.Payload), &p); err != nil {
@@ -174,13 +176,15 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 			Images:   p.Images,
 			// The hook context stays apart: Conteudo is what the user typed,
 			// and only the request to the model joins the two.
-			HookContext: p.HookCtx,
+			HookContext:     p.HookCtx,
+			ResponsesOutput: p.ResponsesOutput,
 		}
 		if p.Usage != nil {
 			m.Usage = &dealer.Usage{
-				PromptTokens: p.Usage.PromptTokens,
-				OutputTokens: p.Usage.OutputTokens,
-				CachedTokens: p.Usage.CachedTokens,
+				PromptTokens:    p.Usage.PromptTokens,
+				OutputTokens:    p.Usage.OutputTokens,
+				CachedTokens:    p.Usage.CachedTokens,
+				ReasoningTokens: p.Usage.ReasoningTokens,
 			}
 		}
 		// Rehydration: large content stayed in the blob, the event holds the reference.

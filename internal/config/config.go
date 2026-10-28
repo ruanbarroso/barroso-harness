@@ -44,7 +44,7 @@ const (
 func Padrao() Config {
 	return Config{
 		CurrentProvider: ZenProvider,
-		Providers:       map[string]*Provider{ZenProvider: {BaseURL: ZenBaseURL, APIKey: ZenAPIKey}},
+		Providers:       map[string]*Provider{ZenProvider: {BaseURL: ZenBaseURL, APIKey: ZenAPIKey, Protocol: DefaultProtocol}},
 		Model:           ZenModel,
 		Effort:          "none",
 		Janela:          ZenJanela,
@@ -70,13 +70,74 @@ const (
 	FonteManual   = "manual"
 )
 
-// Provider is a Chat Completions endpoint: base URL + key.
+// Provider is a Chat Completions or Responses endpoint: base URL + key,
+// plus the request protocol its requests are written in.
 type Provider struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
 	// DisableParallelToolCalls turns parallel tool calls off for this
 	// provider only (see Config.DisableParallelToolCalls).
 	DisableParallelToolCalls bool `json:"disable_parallel_tool_calls,omitempty"`
+	// Protocol is the request protocol the turn is written in for THIS
+	// provider. Absent = chat_completions (the default every existing
+	// config used); the only values are chat_completions and responses.
+	// It does not verify anything: it only chooses how the request is
+	// written, with no fallback — a provider that rejects it errors.
+	Protocol string `json:"protocol,omitempty"`
+}
+
+// Request protocol of Config.Provider.Protocol (and of /protocol). These two
+// are the only accepted values; anything else is rejected, never guessed.
+const (
+	// ProtocoloChatCompletions is the OpenAI Chat Completions dialect —
+	// the default, and what every config without "protocol" keeps using.
+	ProtocoloChatCompletions = "chat_completions"
+	// ProtocoloResponses is the OpenAI Responses dialect.
+	ProtocoloResponses = "responses"
+)
+
+// DefaultProtocol is the effective protocol of a provider that does not set
+// one: an existing config, or a first install, keeps Chat Completions.
+const DefaultProtocol = ProtocoloChatCompletions
+
+// aliasProtocol maps what a person types to the stored value. Case, spaces,
+// `_` and `-` are irrelevant ("Chat Completions" == chat_completions);
+// "chat" and "completions" are aliases of Chat Completions. Anything else
+// returns "" (invalid) — no silent fallback, the caller reports it.
+func aliasProtocol(s string) string {
+	n := strings.ToLower(strings.Join(strings.Fields(s), ""))
+	n = strings.NewReplacer("_", "", "-", "", "/", "").Replace(n)
+	switch n {
+	case "chat", "completions", "chatcompletions":
+		return ProtocoloChatCompletions
+	case "responses":
+		return ProtocoloResponses
+	}
+	return ""
+}
+
+// NormalizarProtocolo normalizes a written protocol to its canonical value
+// (case/space/separator tolerant) and reports whether it is accepted. Empty
+// means "not set": PadraoProtocolo resolves it. Aliases such as "chat" map
+// to chat_completions.
+func NormalizarProtocolo(s string) (string, bool) {
+	if strings.TrimSpace(s) == "" {
+		return "", true
+	}
+	if v := aliasProtocol(s); v != "" {
+		return v, true
+	}
+	return "", false
+}
+
+// PadraoProtocolo resolves the EFFECTIVE protocol of a stored value: empty
+// (or unknown) is the chat_completions default — an old config, or a fresh
+// install, keeps working exactly as before.
+func PadraoProtocolo(stored string) string {
+	if v, ok := NormalizarProtocolo(stored); ok && v != "" {
+		return v
+	}
+	return DefaultProtocol
 }
 
 // Config is the persisted harness configuration.
@@ -93,10 +154,10 @@ type Config struct {
 	// request being sent. Absent = dealer default (300 s); 0 = disabled. There
 	// is no first-byte deadline and no total deadline by design. An old
 	// provider_first_byte_secs key in config.json is ignored.
-	IdleSecs *int `json:"provider_idle_secs,omitempty"`
-	BaseURL       string `json:"-"` // resolved from the active provider
-	APIKey        string `json:"-"` // resolved from the active provider; never log
-	Home          string `json:"-"`
+	IdleSecs *int   `json:"provider_idle_secs,omitempty"`
+	BaseURL  string `json:"-"` // resolved from the active provider
+	APIKey   string `json:"-"` // resolved from the active provider; never log
+	Home     string `json:"-"`
 
 	// envOverride is the provider built from BARROSO_BASE_URL /
 	// BARROSO_AUTH_TOKEN. It wins over providers/current_provider and lives
@@ -243,6 +304,46 @@ func (c *Config) Ativo() *Provider {
 	return nil
 }
 
+// ProtocoloAtivo is the EFFECTIVE request protocol of the active provider:
+// chat_completions or responses, never empty. It only reports the choice; it
+// does not check that the provider supports it.
+func (c *Config) ProtocoloAtivo() string {
+	if p := c.Ativo(); p != nil {
+		return PadraoProtocolo(p.Protocol)
+	}
+	return DefaultProtocol
+}
+
+// ComProtocolo returns a copy of the config whose active provider uses the
+// given protocol (any accepted spelling; an invalid one is an error and
+// nothing changes). The providers map and the provider are copied, so the
+// original stays untouched if the caller then fails to save. An env-built
+// provider is refused: it lives only in memory and Save would never see it.
+func (c Config) ComProtocolo(s string) (Config, error) {
+	v, ok := NormalizarProtocolo(s)
+	if !ok || v == "" {
+		return c, fmt.Errorf("invalid protocol %q: use %s or %s", strings.TrimSpace(s), ProtocoloChatCompletions, ProtocoloResponses)
+	}
+	if c.envOverride != nil {
+		return c, fmt.Errorf("provider is set by %s/%s; unset them to change the protocol", EnvBaseURL, EnvAuthToken)
+	}
+	old := c.Provider(c.CurrentProvider)
+	if old == nil {
+		return c, errors.New("no provider is selected; set one with /provider first")
+	}
+	providers := make(map[string]*Provider, len(c.Providers))
+	for k, p := range c.Providers {
+		if p != nil {
+			cp := *p
+			p = &cp
+		}
+		providers[k] = p
+	}
+	providers[c.CurrentProvider].Protocol = v
+	c.Providers = providers
+	return c, nil
+}
+
 // ParallelToolCallsOff reports whether the active provider must get one tool
 // call per response: the global setting or the active provider's own.
 func (c *Config) ParallelToolCallsOff() bool {
@@ -347,6 +448,17 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	migrateLegacyShape(b, &c)
+	// Every provider gets its EFFECTIVE protocol: absent = chat_completions
+	// (old configs keep working); an invalid value is an error, never a guess.
+	for name, p := range c.Providers {
+		if p == nil {
+			continue
+		}
+		if _, ok := NormalizarProtocolo(p.Protocol); !ok {
+			return c, fmt.Errorf("invalid config %s: provider %q has protocol %q; use %s or %s", path, name, p.Protocol, ProtocoloChatCompletions, ProtocoloResponses)
+		}
+		p.Protocol = PadraoProtocolo(p.Protocol)
+	}
 	// No "effort" key at all: the default level. "none" is the explicit
 	// "send no reasoning_effort" (what /effort - stores).
 	var keys map[string]json.RawMessage
@@ -378,11 +490,12 @@ func (c *Config) applyEnv() {
 	}
 	p := Provider{BaseURL: DefaultBaseURL}
 	if cur := c.Ativo(); cur != nil {
-		p = *cur
+		p = *cur // keeps the provider's Protocol (and its other fields)
 		if p.BaseURL == "" {
 			p.BaseURL = DefaultBaseURL
 		}
 	}
+	p.Protocol = PadraoProtocolo(p.Protocol)
 	if base != "" {
 		p.BaseURL = strings.TrimSuffix(base, "/")
 	}

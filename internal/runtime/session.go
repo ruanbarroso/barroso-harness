@@ -165,9 +165,13 @@ func (s *Session) rebuild() {
 		}
 		s.key = id
 	}
+	// The configured protocol decides which dialect the request is written
+	// in; chat_completions is the default for a provider that sets none.
 	s.dealer = dealer.Novo(dealer.Config{
 		BaseURL: base, APIKey: key, Model: s.config.Model,
-		MaxTokens: s.config.MaxTokens, JanelaTokens: s.config.Janela,
+		Protocol:                 s.config.ProtocoloAtivo(),
+		MaxTokens:                s.config.MaxTokens,
+		JanelaTokens:             s.config.Janela,
 		Effort:                   s.config.Effort,
 		DisableParallelToolCalls: s.config.ParallelToolCallsOff(),
 		Idle:                     secs(s.config.IdleSecs),
@@ -264,6 +268,24 @@ func (s *Session) StartFresh() {
 	s.history = nil
 }
 
+// registrarSaida stores native Responses output items with the assistant event
+// so Resume can replay stateless reasoning/tool turns without exposing them in
+// the visible transcript.
+func registrarSaida(evento map[string]any, round *dealer.Rodada) {
+	if round != nil && len(round.ResponsesOutput) > 0 {
+		evento["responses_output"] = round.ResponsesOutput
+	}
+}
+
+func mensagemResposta(round *dealer.Rodada) dealer.Mensagem {
+	return dealer.Mensagem{
+		Role:            "assistant",
+		Conteudo:        round.Texto,
+		Usage:           round.Usage,
+		ResponsesOutput: round.ResponsesOutput,
+	}
+}
+
 // Send runs a turn and keeps the transcript between calls. The user message
 // and the rounds are appended to a private buffer and only committed on full
 // success; YOLO tool execution already performed cannot be reverted, but the
@@ -332,6 +354,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	// Consecutive cuts at the output limit, and the limit of the retry when the
 	// cut came back empty (the model spent everything thinking).
 	extraLimit := 0
+	lastEmptyCutLimit := 0
 	// Empty final answers: the round that ends the turn may come back with no
 	// text and no tool calls (GLM free spends the whole budget on reasoning
 	// and stops, measured 2026-10-22). Regen (re-request the SAME transcript,
@@ -531,17 +554,26 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				rc.Cortada(limit, false)
 			}
 			if strings.TrimSpace(round.Texto) == "" && len(round.Tools) == 0 {
-				// Only thought: retry with twice the limit.
+				// Only thought: retry with twice the limit. If the context-window
+				// clamp prevents an increase, another request would be identical.
+				if limit <= lastEmptyCutLimit {
+					return fmt.Errorf("provider exhausted the output limit (%d tokens) without visible text, and the limit cannot increase within the configured context window; lower reasoning effort or adjust the context/output limits", limit)
+				}
+				lastEmptyCutLimit = limit
 				extraLimit = limit * 2
 				continue
 			}
 			// Half-written text (or tool call): the text stays, the tools do not
 			// run (their arguments may be truncated) and the model is told to
 			// continue in smaller pieces.
-			if round.Texto != "" {
-				r.Resposta(round.Texto)
-				working = append(working, dealer.Mensagem{Role: "assistant", Conteudo: round.Texto, Usage: round.Usage})
-				s.record("assistant", map[string]any{"role": "assistant", "content": round.Texto})
+			if round.Texto != "" || len(round.ResponsesOutput) > 0 {
+				if round.Texto != "" {
+					r.Resposta(round.Texto)
+				}
+				working = append(working, mensagemResposta(round))
+				evento := map[string]any{"role": "assistant", "content": round.Texto}
+				registrarSaida(evento, round)
+				s.record("assistant", evento)
 			}
 			notice := cutNotice
 			if len(round.Tools) > 0 {
@@ -603,24 +635,28 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 					"tentativa": toolTextRetries,
 				})
 				working = append(working,
-					dealer.Mensagem{Role: "assistant", Conteudo: round.Texto, Usage: round.Usage},
+					mensagemResposta(round),
 					dealer.Mensagem{Role: "user", Conteudo: toolTextNotice})
-				s.record("assistant", map[string]any{"role": "assistant", "content": round.Texto})
+				evento := map[string]any{"role": "assistant", "content": round.Texto}
+				registrarSaida(evento, round)
+				s.record("assistant", evento)
 				s.record("user_message", map[string]any{"role": "user", "content": toolTextNotice})
 				continue
 			}
 			r.Resposta(round.Texto)
 			r.Tokens(promptUsage, outputUsage, time.Since(start), compacted)
-			working = append(working, dealer.Mensagem{Role: "assistant", Conteudo: round.Texto, Usage: round.Usage})
+			working = append(working, mensagemResposta(round))
 			s.history = working
 			// Committed text enters the log AFTER the transcript commit: a failed
 			// round leaves no trace of a response that never existed.
 			assistant := map[string]any{"role": "assistant", "content": round.Texto}
+			registrarSaida(assistant, round)
 			if round.Usage != nil {
 				assistant["usage"] = map[string]any{
-					"prompt_tokens": round.Usage.PromptTokens,
-					"output_tokens": round.Usage.OutputTokens,
-					"cached_tokens": round.Usage.CachedTokens,
+					"prompt_tokens":    round.Usage.PromptTokens,
+					"output_tokens":    round.Usage.OutputTokens,
+					"cached_tokens":    round.Usage.CachedTokens,
+					"reasoning_tokens": round.Usage.ReasoningTokens,
 				}
 			}
 			s.record("assistant", assistant)
@@ -630,17 +666,19 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		// Build the assistant tool-call + results in a separate transaction; only
 		// add them to working when every execution has finished.
 		turn := make([]dealer.Mensagem, 0, len(round.Tools)+1)
-		if round.Texto != "" {
+		if round.Texto != "" || len(round.ResponsesOutput) > 0 {
 			// Text that comes with tool calls is an intermediate message ("let me
 			// check X"): renderers that show progress get it before the tools run.
 			if rn, ok := r.(RendererNota); ok && strings.TrimSpace(round.Texto) != "" {
 				rn.Nota(round.Texto)
 			}
-			turn = append(turn, dealer.Mensagem{Role: "assistant", Conteudo: round.Texto, Usage: round.Usage})
+			turn = append(turn, mensagemResposta(round))
 			// The text enters the log with its calls: without it, session/load and
 			// /resume rebuild a history of silent tool rounds, and the model copies
 			// that pattern and stops speaking between tools (Bruce, 2026-10-23).
-			s.record("assistant", map[string]any{"role": "assistant", "content": round.Texto})
+			evento := map[string]any{"role": "assistant", "content": round.Texto}
+			registrarSaida(evento, round)
+			s.record("assistant", evento)
 		}
 		results := make([]dealer.Mensagem, 0, len(round.Tools))
 		for _, call := range round.Tools {

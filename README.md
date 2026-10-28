@@ -49,6 +49,9 @@ In-session commands:
 /effort -              clears it; reasoning_effort is omitted (no silent fallback)
 /provider              changes base URL + key; validates /models before saving
 /provider zen          removes custom providers and restores public OpenCode Zen + big-pickle
+/protocol              shows the request protocol of the active provider (default: chat_completions)
+/protocol responses    sends the next requests with the Responses protocol
+/protocol chat         back to Chat Completions (aliases: chat, completions, chat_completions)
 /new                   clears the session transcript (new conversation, config intact)
 /update                downloads and installs the newest release from the channel
 /skills                lists the skills; /<name> [args] runs one
@@ -81,6 +84,8 @@ If the release does not publish `SHA256SUMS`, or it does not list this platform'
 The chosen version is the **highest number** among stable releases, not the first in the list: the API returns them in creation order, and a republish can put an older version first. Trusting the position would offer a downgrade. `v0.1.0` (stable) is newer than `v0.1.0-bh.10`, and the suffix compares numerically — `bh.10` > `bh.9`.
 
 On Windows, the running executable cannot be renamed. When that happens, the command prints the PowerShell `Move-Item` to run afterwards; it also swaps the `bh.exe`/`barroso-harness.exe` alias, which are two files and need two staged copies.
+
+**Request protocol.** Each provider in `config.json` accepts an optional `"protocol"`: `chat_completions` (default, preserving existing configs) or `responses`. `/protocol [chat|chat_completions|completions|responses]` shows or changes the active provider's setting and saves it; unknown values fail. It selects the request format only—it does not probe support and never falls back, so enable Responses only for endpoints validated to support it. `/protocol chat` switches back.
 
 Whether effort levels are accepted depends on the provider/model. If a request is rejected, the error is shown with no automatic downgrade; use `/effort -` to clear it. Model/provider switches keep the committed text messages; pending tool calls are never left orphaned in the transcript.
 

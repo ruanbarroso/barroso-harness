@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Barroso Harness — suporte Chat Completions + Responses</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--raised:#1e1e1e;--text:#eee;--muted:#aaa;--line:#343434;--blue:#6db5ff;--orange:#f5a742;--green:#7fd88f;--purple:#b79af0;--red:#e06c75}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}header{padding:52px max(24px,calc((100vw - 1120px)/2)) 38px;background:linear-gradient(130deg,#101a24,#0a0a0a 68%);border-bottom:1px solid var(--line)}.eyebrow{color:var(--blue);font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:12px}h1{font-size:clamp(32px,5vw,52px);line-height:1.1;margin:14px 0}header p{max-width:820px;color:var(--muted);font-size:17px;margin:0}.wrap{max-width:1120px;margin:auto;padding:28px 24px 72px}h2{margin:38px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line);font-size:25px}h3{margin:0 0 10px;font-size:18px}p{margin:10px 0}ul,ol{padding-left:22px}li{margin:5px 0}.callout,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin:14px 0}.callout{border-left:4px solid var(--blue)}.callout.ok{border-left-color:var(--green)}.callout.warn{border-left-color:var(--orange)}.callout.risk{border-left-color:var(--red)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}.card{margin:0}.tag{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--muted);font-size:12px;margin:2px}.good{color:var(--green)}.warntext{color:var(--orange)}.bad{color:var(--red)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}code{background:#222;padding:2px 5px;border-radius:4px;color:#d8e9ff}pre{background:#080b0e;border:1px solid var(--line);border-radius:9px;padding:16px;overflow:auto;font-size:13px;line-height:1.55;color:#dce8f5}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:11px 12px;border-bottom:1px solid var(--line)}th{color:var(--blue);font-size:13px}td{color:#ddd}a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.phase{display:grid;grid-template-columns:58px 1fr;gap:14px;margin:16px 0}.num{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;background:#182635;border:1px solid #31516f;color:var(--blue);font-weight:800}.phasebody{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}.small{font-size:13px;color:var(--muted)}.toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}.toc a{background:#121820;border:1px solid var(--line);border-radius:7px;padding:6px 10px;font-size:13px}footer{border-top:1px solid var(--line);padding:20px 0;color:var(--muted);font-size:13px;margin-top:40px}@media(max-width:650px){.wrap{padding:20px 16px 50px}header{padding:36px 18px}table{display:block;overflow-x:auto}}
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Plano técnico · Barroso Harness · 28 out 2026</div>
+  <h1>Chat Completions + Responses API</h1>
+  <p>Faz sentido oferecer suporte aos dois protocolos. O trabalho principal não é trocar a URL: é adicionar um adaptador Responses ao lado do Chat atual, com seleção explícita por provider, sem quebrar o contrato existente do Harness e dos gateways.</p>
+  <nav class="toc"><a href="#resumo">Resumo</a><a href="#diagnostico">BH hoje</a><a href="#wire">Mudanças de protocolo</a><a href="#opencode">Exemplo OpenCode</a><a href="#estado">Estado e raciocínio</a><a href="#plano">Plano por fases</a><a href="#validacao">Critérios de aceite</a><a href="#fontes">Fontes</a></nav>
+</header>
+<main class="wrap">
+<section id="resumo">
+  <div class="callout ok"><b>Resposta curta: sim — suportar ambos é a melhor escolha.</b> A OpenAI ainda suporta Chat Completions e recomenda Responses para projetos novos. Mantenha os dois adaptadores disponíveis e escolha explicitamente o protocolo por provider (e, se necessário, por modelo). Chat Completions continua sendo o padrão de compatibilidade para configurações existentes; Responses fica disponível onde foi validado.</div>
+  <div class="callout warn"><b>Ressalva essencial:</b> ainda não está provado que todos os endpoints configuráveis no BH aceitam <code>POST /v1/responses</code>. Em particular, não presumir que o default OpenCode Zen expõe a mesma rota só porque o upstream OpenAI a tem. O catálogo <code>/models</code> também não atesta suporte a Responses.</div>
+  <p><span class="tag">Suporte simultâneo aos dois protocolos</span><span class="tag">Seleção explícita, sem fallback silencioso</span><span class="tag">Testes por endpoint real</span></p>
+</section>
+
+<section id="diagnostico">
+<h2>1. O que o BH faz hoje</h2>
+<p>O limite do protocolo está bem concentrado: <code>internal/dealer/dealer.go</code> serializa o transcript interno em Chat Completions, envia <code>/chat/completions</code> e interpreta o SSE. O runtime já mantém uma representação própria (<code>dealer.Mensagem</code>) com mensagens de usuário/assistente, tool call/result e imagens — isso evita reescrever toda a orquestração do agente.</p>
+<table><thead><tr><th>Área</th><th>Contrato atual</th><th>Implicação da migração</th></tr></thead><tbody>
+<tr><td>Request</td><td><code>messages</code>, <code>max_tokens</code>, <code>reasoning_effort</code>; tools aninhadas como <code>{type:function,function:{...}}</code>.</td><td>Responses usa <code>input</code>, <code>max_output_tokens</code>, <code>reasoning.effort</code> e funções planas.</td></tr>
+<tr><td>Stream</td><td><code>choices[0].delta</code> e sentinela <code>[DONE]</code>.</td><td>Eventos tipados como <code>response.output_text.delta</code>, argumentos de função e eventos terminais Responses.</td></tr>
+<tr><td>Tool loop</td><td>Tool calls entram no histórico como assistant/tool; respostas usam <code>tool_call_id</code>.</td><td>Representar <code>function_call</code> e <code>function_call_output</code>, associados por <code>call_id</code>; preservar o item de saída final.</td></tr>
+<tr><td>Contexto</td><td>Histórico editável pelo BH, estimativa e compactação em <code>runtime/session.go</code>, persistência recuperável em <code>internal/runtime/persist.go</code>.</td><td>Continua sendo o BH quem decide qual histórico enviar. Uma cadeia opaca no provider pode divergir da compactação e do /resume.</td></tr>
+<tr><td>Contrato especial</td><td><code>internal/dealer/zen.go</code> reproduz um wire contract Chat/Opencode medido, incluindo formato exato das tools e tools de fingerprint.</td><td>Não transportar automaticamente o mesmo fingerprint ao formato Responses; revalidar autorização, identidade, headers e política do gateway.</td></tr>
+</tbody></table>
+<div class="callout"><b>Boa notícia:</b> o dealer já é a fronteira adequada para a tradução. A intenção é preservar runtime, executor de tools, persistência e CLI, adicionando um adaptador Responses ao lado do atual.</div>
+</section>
+
+<section id="wire">
+<h2>2. O formato Responses que o dealer precisa falar</h2>
+<h3>Request</h3>
+<p>Exemplo conceitual para uma chamada de streaming com tool local. Em produção, o BH enviaria todos os itens do transcript que decidiu conservar:</p>
+<pre><code>POST /v1/responses
+{
+  "model": "model-id",
+  "instructions": "instruções estáveis do BH e BARROSO.md",
+  "input": [{ "role": "user", "content": [
+    { "type": "input_text", "text": "Leia o arquivo e explique." }
+  ]}],
+  "tools": [{
+    "type": "function",
+    "name": "read",
+    "description": "...",
+    "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
+  }],
+  "tool_choice": "auto",
+  "reasoning": { "effort": "medium" },
+  "max_output_tokens": 32768,
+  "store": false,
+  "include": ["reasoning.encrypted_content"],
+  "stream": true
+}</code></pre>
+<p>Instruções de sistema podem ir no campo <code>instructions</code> ou como item system/developer de <code>input</code>. Se usar <code>previous_response_id</code>, a documentação alerta que as instruções de topo não são herdadas: precisam ser reenviadas a cada request.</p>
+<h3>Conversão do transcript e multimodalidade</h3>
+<ul>
+<li>Texto do usuário vira item <code>input_text</code>; imagens viram <code>input_image</code> com URL ou data URL. O código atual já lê e inline imagens, mas muda o envelope.</li>
+<li>Texto do assistant que é reproduzido no histórico usa <code>output_text</code>; chamadas locais viram <code>{type:function_call, call_id, name, arguments}</code>.</li>
+<li>Resultado de tool vira <code>{type:function_call_output, call_id, output}</code>. Use o <code>call_id</code> da chamada — não confunda com o <code>id</code> do item Responses.</li>
+<li>Responses aceita ferramentas function planas, diferente do formato nested atual. Não forçar <code>strict:true</code> sem antes normalizar e testar os schemas do catálogo dinâmico do BH.</li>
+<li><code>max_output_tokens</code> conta tokens de raciocínio e de resposta; confirmar que o teto do BH e sua regra de retry/corte produzem o limite desejado.</li>
+</ul>
+<h3>Stream tipado, não Chat chunks</h3>
+<pre><code>response.created                         → metadata e começo da rodada
+response.output_text.delta               → acrescentar texto
+response.function_call_arguments.delta   → acumular argumentos por item_id/output_index
+response.output_item.done                → fechar item; função recebe call_id/name/arguments finais
+response.completed                       → resposta terminou; ler usage
+response.incomplete                       → terminou incompleta; mapear incomplete_details
+response.failed / error                  → falha do provider, nunca resposta vazia bem-sucedida</code></pre>
+<p>O parser deve aceitar eventos desconhecidos sem travar em extensões futuras, mas reconhecer erros e terminais. Não assumir que <code>[DONE]</code> sozinho é o término semântico: Responses tem eventos de ciclo de vida. Usar <code>response.output_item.done</code> para finalizar tool calls evita executar argumentos parciais.</p>
+</section>
+
+<section id="opencode">
+<h2>3. O que o código do OpenCode ensina</h2>
+<p>Há implementação funcional de Responses no repositório OpenCode. A parte mais útil para o BH é o adaptador de provider em <code>packages/core/src/github-copilot/responses/</code>. Ele mostra que a migração é uma adaptação de ponta a ponta, não uma troca de endpoint.</p>
+<table><thead><tr><th>Arquivo no checkout local</th><th>Exemplo que vale copiar como padrão</th></tr></thead><tbody>
+<tr><td><code>convert-to-openai-responses-input.ts</code></td><td>Traduz roles/conteúdo: system/developer, texto e imagens, chamadas/results de funções e raciocínio. Em modo sem store preserva reasoning encriptado quando existe.</td></tr>
+<tr><td><code>openai-responses-language-model.ts</code></td><td>Constrói request; usa <code>max_output_tokens</code>, <code>reasoning.effort</code>, <code>store</code>/<code>include</code>; envia para <code>/responses</code>; tem handlers JSON e SSE e interpreta usage/itens.</td></tr>
+<tr><td><code>openai-responses-prepare-tools.ts</code></td><td>Converte tools do framework para o formato Responses, mapeia tool choice e valida ferramentas especiais.</td></tr>
+<tr><td><code>openai-responses-api-types.ts</code> e <code>map-openai-responses-finish-reason.ts</code></td><td>Tipos discriminados dos items e conversão de término para stop/length/tool-calls.</td></tr>
+</tbody></table>
+<p>Outro adaptador no código de protocolo do OpenCode, <code>packages/llm/src/protocols/openai-responses.ts</code>, ilustra a redução de mensagens internas para items, parser SSE por evento, stream de funções e metadados de reasoning. Ele também mostra que raciocínio e texto são itens separados e que as chamadas de tools hospedadas pelo provider pedem tratamento próprio.</p>
+<div class="callout warn"><b>Não portar o OpenCode inteiro:</b> reaproveitar os formatos e os casos de teste, mas manter o dealer e o modelo interno do BH. O OpenCode usa abstrações/SDKs e cobre tools hospedadas além do conjunto local do BH.</div>
+</section>
+
+<section id="estado">
+<h2>4. Estado de conversa, raciocínio e gateways</h2>
+<div class="grid">
+<article class="card"><h3>Histórico gerenciado pelo BH — recomendado no primeiro passo</h3><p>Enviar a cada request os itens do transcript atual, como já faz a harness; usar <code>store:false</code> explicitamente e não depender de IDs remotos. Isso mantém compactação, pruning, /new e /resume sob controle local.</p><p class="small">Atenção: reasoning models podem exigir replay dos output items completos, inclusive <code>reasoning.encrypted_content</code> e mensagens/calls, para preservar contexto entre requests stateless. O transcript atual do BH não persiste esses metadados; desenhar sua serialização antes de declarar o raciocínio entre rodadas equivalente ao Chat.</p></article>
+<article class="card"><h3>previous_response_id — não habilitar por padrão</h3><p>É uma opção útil da API quando se quer contexto armazenado/remoto. Porém o BH compacta/edita o histórico, recupera sessões de SQLite e pode fazer retries com corpo diferente; uma cadeia remota oculta pode reintroduzir contexto removido ou duplicar o transcript enviado.</p><p class="small">Se for adotado depois, persistir response IDs por conversa, invalidar a cadeia ao compactar, resetar ou trocar provider/modelo, reenviar instructions e validar privacidade/retenção do endpoint.</p></article>
+</div>
+<div class="callout risk"><b>Compatibilidade depende da URL.</b> O gateway Barroso Keys tem uma rota Responses documentada/implementada, mas ela traduz para Chat Completions no roteador comum; não é prova de que a geração foi nativa Responses. O gateway não armazena responses e recusa <code>previous_response_id</code>, <code>conversation</code>, <code>background</code> e templates <code>prompt</code>. Outros endpoints (inclusive Zen e proxies OpenAI-compatible) precisam de probes próprios.</div>
+<p>Para usage, mapear <code>input_tokens</code> → prompt, <code>output_tokens</code> → output, <code>input_tokens_details.cached_tokens</code> → cache e <code>output_tokens_details.reasoning_tokens</code> → tokens de reasoning. Mapear <code>incomplete_details.reason == max_output_tokens</code> para a rotina de corte atual; status failed deve retornar erro, não uma rodada sem conteúdo.</p>
+</section>
+
+<section id="plano">
+<h2>5. Plano de implementação do suporte duplo</h2>
+<div class="phase"><div class="num">0</div><div class="phasebody"><h3>Fechar o contrato por endpoint</h3><p>Fazer smoke probes sem credenciais em logs e sem alterar o default: cada provider deve confirmar rota, autenticação, SSE Responses, tools, imagens, reasoning/effort, usage e limites de parâmetros. Separar explicitamente o que é OpenAI nativo, Barroso Keys (tradução) e OpenCode Zen. Não inferir capacidade por <code>/models</code>.</p></div></div>
+<div class="phase"><div class="num">1</div><div class="phasebody"><h3>Introduzir escolha explícita Chat/Responses</h3><p>Adicionar configuração persistida ao provider (por exemplo <code>protocol: chat_completions | responses</code>), mantendo <code>chat_completions</code> para configs existentes. Expor a escolha no fluxo de <code>/provider</code> e passá-la a <code>dealer.Config</code>. Se modelos diferentes no mesmo endpoint tiverem capacidades distintas, permitir uma sobrescrita por modelo. Não tentar automaticamente o outro protocolo depois de um erro: isso pode duplicar custo, ocultar incompatibilidade ou repetir uma rodada com tools.</p></div></div>
+<div class="phase"><div class="num">2</div><div class="phasebody"><h3>Adicionar serializador Responses</h3><p>Manter <code>Corpo</code>/<code>CorpoEstimativa</code> para Chat; criar par equivalente para Responses. Traduzir system, histórico, ferramentas, <code>tool_choice</code>, imagens, effort e output cap. Adaptar normalização da URL para não duplicar <code>/responses</code>. A estimativa de contexto precisa usar o mesmo formato/itens reais (com imagem stand-in), ou orçamento e request divergirão.</p></div></div>
+<div class="phase"><div class="num">3</div><div class="phasebody"><h3>Implementar parser SSE tipado</h3><p>Criar parser por <code>type</code>: texto, reasoning summary se habilitado, output item iniciado/finalizado, deltas e conclusão de argumentos, usage, incomplete, failed e error. Correlacionar tool calls por <code>item_id</code>/<code>output_index</code>; executar só depois do item completo. Preservar a lógica já existente de watchdog, cancelamento, HTTP errors e retries.</p></div></div>
+<div class="phase"><div class="num">4</div><div class="phasebody"><h3>Decidir como replayar reasoning e persistir metadados</h3><p>Escolher e documentar política antes do rollout: guardar os output items Responses necessários no transcript/log (incluindo encrypted reasoning) para replay manual, ou provar outro mecanismo compatível com compactação/resume. Se o log só guardar texto e argumentos, a sessão aparentemente funciona, mas pode perder contexto de reasoning nas próximas rodadas. Começar com store explícito e política de privacidade consciente.</p></div></div>
+<div class="phase"><div class="num">5</div><div class="phasebody"><h3>Revalidar o wire contract do OpenCode Zen</h3><p>O caminho atual usa <code>tool_choice:auto</code>, headers de sessão/User-Agent e tool definitions byte-exactas/fingerprintadas. Responses tem schema diferente e pode seguir gate diferente. Testar primeiro sem alterar o contrato Chat; validar também o efeito dos decoys/fingerprint read/shell e a recepção dos headers na rota Responses. Não adicionar os tools Chat-format à requisição Responses.</p></div></div>
+<div class="phase"><div class="num">6</div><div class="phasebody"><h3>Rollout gradual do protocolo escolhido</h3><p>Habilitar Responses apenas em provider/modelo comprovado, mantendo Chat Completions plenamente suportado. Medir TTFT, duração, cache hit, input/output/reasoning tokens, falhas e uso de tools; comparar tarefas equivalentes nos dois protocolos. Atualizar README, onboarding/config e fixtures. Não é necessário remover Chat nem torná-lo indisponível para adotar Responses em endpoints que o suportam.</p></div></div>
+</section>
+
+<section id="validacao">
+<h2>6. Critérios de aceite antes de trocar o default</h2>
+<div class="grid">
+<article class="card"><h3>Contrato de request</h3><ul><li>Rota e auth corretas; sem <code>/v1/v1</code> nem <code>/responses/responses</code>.</li><li>Instruções estáveis; schema e escolha de tools válidos.</li><li>Estimativa de contexto alinhada ao body real com imagens.</li></ul></article>
+<article class="card"><h3>Agente e transcript</h3><ul><li>Uma tool e chamadas paralelas; argumentos fragmentados não executam antes do final.</li><li>Results associados ao <code>call_id</code> certo e tool loop segue até resposta final.</li><li>Pruning/compaction, interrupção, retry e /resume sem chamadas órfãs nem contexto duplicado.</li></ul></article>
+<article class="card"><h3>Terminal, usage e segurança</h3><ul><li>Completed, incomplete por limite, failed, error e stream interrompido diferenciados.</li><li>Tokens/cache/reasoning e tempos chegam ao rodapé/telemetria existentes.</li><li>Política de <code>store</code> explícita; key nunca entra em log/HTML/tests.</li></ul></article>
+</div>
+<p><b>Testes:</b> criar fixtures determinísticas SSE Responses no dealer; testar o body e parser por unidade; servidor <code>httptest</code> para rota/headers/eventos; usar fakes de runtime para tool loop e recuperação. Preservar a suíte Chat e adicionar smoke manual por endpoint em chave/modelo autorizado. Um HTTP 200 de texto simples não basta: a chamada de tool, a resposta correspondente e a segunda chamada do modelo também precisam passar.</p>
+</section>
+
+<section id="fontes">
+<h2>7. Fontes consultadas</h2>
+<ul>
+<li><a href="https://platform.openai.com/docs/guides/migrate-to-responses">OpenAI — Migrate to the Responses API</a>: Responses é recomendada para novos projetos; diferenças de messages/items, geração, estado, tools e exemplos Go.</li>
+<li><a href="https://platform.openai.com/docs/api-reference/responses/create">OpenAI — Responses create reference</a>: body, <code>input</code>, tools, output e usage.</li>
+<li><a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI — Conversation state</a>: transcript manual, <code>previous_response_id</code>, Conversations e replay de reasoning.</li>
+<li><a href="https://platform.openai.com/docs/guides/function-calling">OpenAI — Function calling</a>: schema Responses, <code>call_id</code>, execução e retorno de funções; nota para preservar reasoning items com resultados.</li>
+<li><a href="https://platform.openai.com/docs/guides/streaming-responses">OpenAI — Streaming responses</a>: SSE semântico e eventos de texto, ciclo de vida e erro.</li>
+<li><a href="https://github.com/anomalyco/opencode/blob/52a10f573f1da5103c85990da9341e3645a39365/packages/core/src/github-copilot/responses/convert-to-openai-responses-input.ts">OpenCode source — convert-to-openai-responses-input.ts</a>, <a href="https://github.com/anomalyco/opencode/blob/52a10f573f1da5103c85990da9341e3645a39365/packages/core/src/github-copilot/responses/openai-responses-language-model.ts">language model</a> e <a href="https://github.com/anomalyco/opencode/blob/52a10f573f1da5103c85990da9341e3645a39365/packages/core/src/github-copilot/responses/openai-responses-prepare-tools.ts">prepare tools</a>. Conferidos também no checkout local em <code>C:\Users\ruanb\opencode-src\packages\core\src\github-copilot\responses\</code> (checkout 52a10f5).</li>
+<li><a href="https://github.com/anomalyco/opencode/blob/7ad68f81/packages/llm/src/protocols/openai-responses.ts">OpenCode protocol source — openai-responses.ts</a>: lowering interno, lifecycle e eventos SSE (snapshot consultado 7ad68f81).</li>
+<li>Barroso Harness local: <code>internal/dealer/dealer.go</code>, <code>internal/dealer/zen.go</code>, <code>internal/runtime/session.go</code>, <code>internal/runtime/persist.go</code>, <code>internal/config/config.go</code>, <code>README.md</code>.</li>
+<li>Barroso Keys: memória técnica consultada sobre a rota Responses traduzida para Chat Completions e suas limitações de armazenamento; isto não certifica o OpenCode Zen nem outros gateways.</li>
+</ul>
+</section>
+<footer>Plano de análise, não uma migração já aplicada. O único artefato criado neste pedido é este HTML; a implementação depende de validar o endpoint alvo e fechar o tratamento do estado de reasoning.</footer>
+</main>
+</body>
+</html>

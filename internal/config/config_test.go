@@ -218,3 +218,130 @@ func TestSelectProviderKeepsManualWindow(t *testing.T) {
 		t.Fatalf("derived window should reset: %+v", c3)
 	}
 }
+
+// Existing configs (no "protocol" key) and a first install both resolve to
+// chat_completions.
+func TestProtocolDefaultsToChatCompletions(t *testing.T) {
+	dir, _ := home(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProtocoloAtivo() != ProtocoloChatCompletions || c.Ativo().Protocol != ProtocoloChatCompletions {
+		t.Fatalf("first install protocol = %q", c.ProtocoloAtivo())
+	}
+
+	legacy := `{"current_provider":"p","providers":{"p":{"base_url":"https://x/v1","api_key":"k"}},"model":"m"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.ProtocoloAtivo(); got != ProtocoloChatCompletions {
+		t.Fatalf("legacy config protocol = %q, want chat_completions", got)
+	}
+}
+
+func TestProtocolRoundTripExplicit(t *testing.T) {
+	home(t)
+	c := setTestProvider(Config{Model: "m"}, "p", "https://x/v1", "k")
+	c.Providers["p"].Protocol = ProtocoloResponses
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(Dir(), "config.json"))
+	if !strings.Contains(string(b), `"protocol": "responses"`) {
+		t.Fatalf("protocol not on disk:\n%s", b)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProtocoloAtivo() != ProtocoloResponses {
+		t.Fatalf("round-trip lost the protocol: %q", got.ProtocoloAtivo())
+	}
+}
+
+func TestProtocolNormalizationAndValidation(t *testing.T) {
+	good := map[string]string{
+		"chat": ProtocoloChatCompletions, "Chat_Completions": ProtocoloChatCompletions,
+		" completions ": ProtocoloChatCompletions, "chat-completions": ProtocoloChatCompletions,
+		"RESPONSES": ProtocoloResponses, "responses": ProtocoloResponses, "": "",
+	}
+	for in, want := range good {
+		if got, ok := NormalizarProtocolo(in); !ok || got != want {
+			t.Errorf("NormalizarProtocolo(%q) = %q,%v; want %q,true", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"anthropic", "response api", "chat responses", "messages"} {
+		if _, ok := NormalizarProtocolo(in); ok {
+			t.Errorf("NormalizarProtocolo(%q) accepted", in)
+		}
+	}
+
+	dir, _ := home(t)
+	bad := `{"current_provider":"p","providers":{"p":{"base_url":"https://x/v1","api_key":"k","protocol":"bogus"}},"model":"m"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("invalid protocol must fail Load, got %v", err)
+	}
+	// A tolerant spelling on disk is normalized on load.
+	tol := `{"current_provider":"p","providers":{"p":{"base_url":"https://x/v1","api_key":"k","protocol":" Responses "}},"model":"m"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tol), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil || c.ProtocoloAtivo() != ProtocoloResponses {
+		t.Fatalf("tolerant protocol: %v %q", err, c.ProtocoloAtivo())
+	}
+}
+
+// The env overlay keeps the configured provider's protocol and never writes it.
+func TestProtocolSurvivesEnvOverlay(t *testing.T) {
+	dir, _ := home(t)
+	c := setTestProvider(Config{Model: "m"}, "p", "https://x/v1", "k")
+	c.Providers["p"].Protocol = ProtocoloResponses
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvAuthToken, "env-token")
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.FromEnv() || got.ProtocoloAtivo() != ProtocoloResponses {
+		t.Fatalf("env overlay lost the protocol: fromEnv=%v proto=%q", got.FromEnv(), got.ProtocoloAtivo())
+	}
+	// Env with no configured provider: default protocol.
+	os.Remove(filepath.Join(dir, "config.json"))
+	got, _ = Load()
+	if got.ProtocoloAtivo() != ProtocoloChatCompletions {
+		t.Fatalf("env-only protocol = %q", got.ProtocoloAtivo())
+	}
+	if _, err := got.ComProtocolo("responses"); err == nil {
+		t.Fatal("ComProtocolo must refuse an env-built provider")
+	}
+}
+
+func TestComProtocoloCopiesAndValidates(t *testing.T) {
+	home(t)
+	c := setTestProvider(Config{Model: "m"}, "a", "https://a/v1", "ka")
+	c = setTestProvider(c, "b", "https://b/v1", "kb")
+	got, err := c.ComProtocolo("responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Providers["b"].Protocol != ProtocoloResponses || got.Providers["a"].Protocol != "" {
+		t.Fatalf("only the active provider must change: %+v %+v", got.Providers["a"], got.Providers["b"])
+	}
+	if c.Providers["b"].Protocol != "" {
+		t.Fatal("ComProtocolo mutated the original config")
+	}
+	if _, err := c.ComProtocolo("nope"); err == nil {
+		t.Fatal("invalid protocol accepted")
+	}
+}

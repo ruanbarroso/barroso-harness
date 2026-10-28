@@ -308,7 +308,13 @@ func updateProvider(cfg config.Config, name, base, key string) config.Config {
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]*config.Provider{}
 	}
-	cfg.Providers[name] = &config.Provider{BaseURL: base, APIKey: key}
+	// Re-entering an existing provider keeps its chosen request protocol; a
+	// new one starts on the default.
+	proto := config.DefaultProtocol
+	if old := cfg.Providers[name]; old != nil {
+		proto = config.PadraoProtocolo(old.Protocol)
+	}
+	cfg.Providers[name] = &config.Provider{BaseURL: base, APIKey: key, Protocol: proto}
 	cfg.CurrentProvider = name
 	cfg.BaseURL, cfg.APIKey = base, key
 	return cfg
@@ -707,6 +713,13 @@ func repl(io IO, cfg *config.Config) {
 			statusbar(io.Out, cfg)
 		case "/effort":
 			handleEffort(io, cfg, sess, arg)
+		case "/protocol":
+			if err := cmdProtocol(io, cfg, arg); err != nil {
+				errorFmt(io.ErrOut, "error", err)
+				continue
+			}
+			sess.Configure(*cfg)
+			statusbar(io.Out, cfg)
 		case "/provider":
 			if err := cmdProvider(io, cfg, arg); err != nil {
 				errorFmt(io.ErrOut, "error", err)
@@ -883,7 +896,7 @@ func cmdProvider(io IO, cfg *config.Config, arg string) error {
 	if strings.EqualFold(strings.TrimSpace(arg), "zen") || strings.EqualFold(strings.TrimSpace(arg), config.ZenProvider) {
 		draft := *cfg
 		draft.Providers = map[string]*config.Provider{
-			config.ZenProvider: {BaseURL: config.ZenBaseURL, APIKey: config.ZenAPIKey},
+			config.ZenProvider: {BaseURL: config.ZenBaseURL, APIKey: config.ZenAPIKey, Protocol: config.DefaultProtocol},
 		}
 		draft.CurrentProvider = config.ZenProvider
 		draft.BaseURL, draft.APIKey = config.ZenBaseURL, config.ZenAPIKey
@@ -937,6 +950,36 @@ func cmdProvider(io IO, cfg *config.Config, arg string) error {
 		return err
 	}
 	*cfg = draft
+	return nil
+}
+
+// cmdProtocol shows or sets the request protocol of the ACTIVE provider:
+// /protocol [chat|chat_completions|completions|responses]. It only chooses how
+// requests are written; it does not check that the provider supports the
+// protocol and never falls back to the other one.
+func cmdProtocol(io IO, cfg *config.Config, arg string) error {
+	current := cfg.ProtocoloAtivo()
+	if strings.TrimSpace(arg) == "" {
+		fmt.Fprintf(io.Out, "protocol: %s \u00b7 options: chat (chat_completions), responses \u00b7 `/protocol responses` switches\n", current)
+		return nil
+	}
+	if cfg.FromEnv() {
+		return fmt.Errorf("provider is set by %s/%s; unset them to use /protocol", config.EnvBaseURL, config.EnvAuthToken)
+	}
+	draft, err := cfg.ComProtocolo(arg)
+	if err != nil {
+		return err
+	}
+	next := draft.ProtocoloAtivo()
+	if err := draft.Save(); err != nil {
+		return fmt.Errorf("saving: %w (protocol stays %s)", err, current)
+	}
+	*cfg = draft
+	if next == current {
+		fmt.Fprintf(io.Out, "protocol unchanged: %s\n", next)
+		return nil
+	}
+	fmt.Fprintf(io.Out, "protocol=%s; applies to the next request. It only picks the request protocol: support is not checked and there is no fallback (a provider that rejects it returns an error; `/protocol chat` goes back).\n", next)
 	return nil
 }
 

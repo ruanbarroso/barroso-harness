@@ -26,6 +26,37 @@ import (
 // measured contract of the opencode client, applied to every request and
 // every gateway the harness talks to.
 
+// Request protocols. ProtocoloChat is the default.
+const (
+	ProtocoloChat      = "chat_completions"
+	ProtocoloResponses = "responses"
+)
+
+// sseMaxLinha caps one SSE line. A Responses terminal event echoes the whole
+// response object (instructions included), so the old 4 MiB was too small.
+const sseMaxLinha = 64 << 20
+
+// normalizarProtocolo maps what a config/person wrote to a canonical
+// protocol. ok=false means unknown (no fallback to the other protocol).
+func normalizarProtocolo(s string) (string, bool) {
+	v := strings.ToLower(strings.TrimSpace(s))
+	v = strings.NewReplacer("-", "_", " ", "_").Replace(v)
+	switch v {
+	case "", "chat", "chat_completions", "completions":
+		return ProtocoloChat, true
+	case "responses":
+		return ProtocoloResponses, true
+	}
+	return v, false
+}
+
+// Protocolo is the canonical request protocol of the client (an unknown
+// value is returned lowercased and fails when the body is built).
+func (c *Cliente) Protocolo() string {
+	p, _ := normalizarProtocolo(c.cfg.Protocol)
+	return p
+}
+
 // Config is the provider configuration. The key comes from the local config
 // persisted by the CLI.
 type Config struct {
@@ -35,6 +66,8 @@ type Config struct {
 	MaxTokens    int    `json:"max_tokens"`     // output cap; 0 = per-effort default (TetoPadrao)
 	JanelaTokens int    `json:"context_window"` // 0 = unknown
 	Effort       string `json:"effort"`         // empty = omit reasoning_effort from the request
+	// Protocol selects chat_completions (default) or responses.
+	Protocol string `json:"protocol,omitempty"`
 	// DisableParallelToolCalls sends parallel_tool_calls=false: one tool call
 	// per response, for gateways that drop arguments in parallel batches.
 	DisableParallelToolCalls bool `json:"disable_parallel_tool_calls,omitempty"`
@@ -50,18 +83,22 @@ type Usage struct {
 	// prompt cache (prompt_tokens_details.cached_tokens); 0 when it reports
 	// none.
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// ReasoningTokens is the output-token subset spent on reasoning.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // Mensagem is the internal protocol (serializable, byte-deterministic — it
 // holds no maps). Roles: user, assistant, tool_call, tool_result.
 type Mensagem struct {
-	Role     string `json:"role"`
-	Conteudo string `json:"conteudo,omitempty"`
-	ToolID   string `json:"tool_id,omitempty"`
-	ToolName string `json:"tool_name,omitempty"`
-	ToolArgs string `json:"tool_args,omitempty"`
-	IsErro   bool   `json:"is_erro,omitempty"`
-	Usage    *Usage `json:"usage,omitempty"`
+	Role string `json:"role"`
+	// ResponsesOutput retains exact output items needed for stateless replay.
+	ResponsesOutput []json.RawMessage `json:"responses_output,omitempty"`
+	Conteudo        string            `json:"conteudo,omitempty"`
+	ToolID          string            `json:"tool_id,omitempty"`
+	ToolName        string            `json:"tool_name,omitempty"`
+	ToolArgs        string            `json:"tool_args,omitempty"`
+	IsErro          bool              `json:"is_erro,omitempty"`
+	Usage           *Usage            `json:"usage,omitempty"`
 	// Images are image file paths attached to a user message (pasted into the
 	// full screen as [Image N]). They are read and inlined as base64 data URLs
 	// on every request, so the model needs vision support.
@@ -92,10 +129,12 @@ type ToolChamada struct {
 
 // Rodada is the result of one call to the model.
 type Rodada struct {
-	Texto       string
-	Tools       []ToolChamada
-	Usage       *Usage
-	FimPorTexto bool
+	Texto string
+	Tools []ToolChamada
+	Usage *Usage
+	// ResponsesOutput preserves provider output items for store:false replay.
+	ResponsesOutput []json.RawMessage
+	FimPorTexto     bool
 	// Cortada: the provider stopped at the output cap (finish_reason
 	// "length"). Text and tool calls may be incomplete.
 	Cortada bool
@@ -195,6 +234,8 @@ type oaiMsg struct {
 	Content    any       `json:"content,omitempty"` // *string, or []contentPart for user images
 	ToolCallID string    `json:"tool_call_id,omitempty"`
 	ToolCalls  []oaiCall `json:"tool_calls,omitempty"`
+	// ResponsesOutput is never sent on Chat; the Responses body replays it.
+	ResponsesOutput []json.RawMessage `json:"-"`
 }
 
 func strNil(s string) *string { return &s }
@@ -218,8 +259,23 @@ func (c *Cliente) CorpoEstimativa(system string, msgs []Mensagem, tools []map[st
 // at 4 chars/token).
 var imageEstimateStandIn = strings.Repeat("A", 4<<10)
 
+// corpo dispatches on the protocol. An unknown protocol is an error: there
+// is no fallback to the other one.
 func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, inline bool) ([]byte, error) {
-	list := []oaiMsg{{Role: "system", Content: strNil(comBlocoEnv(system))}}
+	p, ok := normalizarProtocolo(c.cfg.Protocol)
+	if !ok {
+		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", strings.TrimSpace(c.cfg.Protocol), ProtocoloChat, ProtocoloResponses)
+	}
+	if p == ProtocoloResponses {
+		return c.corpoResponses(system, msgs, tools, inline)
+	}
+	return c.corpoChat(system, msgs, tools, inline)
+}
+
+// converterHistorico turns the internal transcript into Chat-compatible
+// messages (no system message, no repair): both protocols build on it.
+func converterHistorico(msgs []Mensagem, inline bool) ([]oaiMsg, error) {
+	var list []oaiMsg
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
@@ -229,7 +285,7 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 			}
 			list = append(list, oaiMsg{Role: "user", Content: strNil(m.TextoModelo())})
 		case "assistant", "tool_call":
-			a := oaiMsg{Role: "assistant", Content: strNil(m.Conteudo)}
+			a := oaiMsg{Role: "assistant", Content: strNil(m.Conteudo), ResponsesOutput: m.ResponsesOutput}
 			if m.ToolID != "" {
 				var call oaiCall
 				call.ID = m.ToolID
@@ -245,6 +301,15 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 			return nil, fmt.Errorf("unknown role: %q", m.Role)
 		}
 	}
+	return list, nil
+}
+
+func (c *Cliente) corpoChat(system string, msgs []Mensagem, tools []map[string]any, inline bool) ([]byte, error) {
+	hist, err := converterHistorico(msgs, inline)
+	if err != nil {
+		return nil, err
+	}
+	list := append([]oaiMsg{{Role: "system", Content: strNil(comBlocoEnv(system))}}, hist...)
 	// Anthropic wiring: multi-tool rounds formed as adjacent assistant
 	// messages (one call each) reject on the Claude degraus — the translated
 	// body groups every consecutive `tool` result into ONE user message,
@@ -254,6 +319,11 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 	// 2026-10-25 02:23Z). One assistant announcing the whole round keeps the
 	// pairs adjacency-valid on every dialect.
 	list = fundirChamadasConsecutivas(list)
+	// Duplicated tool-call ids across the history are rejected upstream with
+	// 400 — the first occurrence of each id keeps it, later ones are renamed
+	// with their paired results. This runs BEFORE re-pairing: pairing by a
+	// still-duplicated id would attach both results to the last owner.
+	desduplicarIDsDeChamada(list)
 	// Same contract for positions: each `tool` message must sit right after
 	// the assistant that announced its id. Interrupted turns (healed orphan
 	// calls, results recorded after later turns) can leave results stranded
@@ -261,10 +331,6 @@ func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, 
 	// results whose call appears nowhere are dropped (nothing upstream can
 	// pair them, and the harness never writes such a result).
 	list = reapararResultados(list)
-	// Duplicated tool-call ids across the history are rejected upstream with
-	// 400 — the first occurrence of each id keeps it, later ones are renamed
-	// with their paired results.
-	desduplicarIDsDeChamada(list)
 	wireTools, notas := aplicarFingerprint(tools)
 	if len(notas) > 0 {
 		// Appended decoys need their brake where the gate does not validate:
@@ -444,6 +510,16 @@ func imageMime(path string) string {
 	return "image/png"
 }
 
+// elapsed rounds strictly positive so telemetry and TTFT remain observable on
+// Windows clocks whose resolution can make an immediate event measure 0 ns.
+func elapsed(start time.Time) time.Duration {
+	d := time.Since(start)
+	if d <= 0 {
+		return time.Nanosecond
+	}
+	return d
+}
+
 type sseChunk struct {
 	Choices []struct {
 		Delta struct {
@@ -471,6 +547,9 @@ type sseChunk struct {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -503,7 +582,14 @@ func (c *Cliente) Rodar(system string, msgs []Mensagem, tools []map[string]any) 
 func (c *Cliente) tentativa(ctx context.Context, body []byte) (*Rodada, error) {
 	wctx, wd := newWatchdog(ctx, pick(c.cfg.Idle, idleTimeout))
 	defer wd.stop()
+	proto, ok := normalizarProtocolo(c.cfg.Protocol)
+	if !ok {
+		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", strings.TrimSpace(c.cfg.Protocol), ProtocoloChat, ProtocoloResponses)
+	}
 	endpoint := NormalizarURL(c.cfg.BaseURL) + "/chat/completions"
+	if proto == ProtocoloResponses {
+		endpoint = NormalizarURL(c.cfg.BaseURL) + "/responses"
+	}
 	req, err := http.NewRequestWithContext(wctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -524,7 +610,11 @@ func (c *Cliente) tentativa(ctx context.Context, body []byte) (*Rodada, error) {
 		return nil, fmt.Errorf("provider: %w", cause(wctx, err))
 	}
 	defer resp.Body.Close()
-	r, err := readRound(resp, wctx, sent, wd.kick)
+	read := readRound
+	if proto == ProtocoloResponses {
+		read = readResponses
+	}
+	r, err := read(resp, wctx, sent, wd.kick)
 	return r, cause(wctx, err)
 }
 
@@ -538,7 +628,8 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 	}
 	r := &Rodada{}
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 1<<20), 4<<20)
+	sc.Buffer(make([]byte, 0, 1<<20), sseMaxLinha)
+	terminal := false // [DONE] or a finish_reason arrived
 	pending := map[int]*oaiCall{}
 	// byID maps a call id to its slot; slotOf maps an upstream index to the
 	// slot it was resolved to (an index can be remapped when a new id arrives
@@ -555,6 +646,12 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 		}
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {
+			if strings.HasPrefix(line, "{") {
+				// A bare JSON body served as 200 (no SSE framing).
+				if err := erroDePayload(line); err != nil {
+					return nil, err
+				}
+			}
 			continue // blank separators and ": ping" comments are not progress
 		}
 		if kick != nil {
@@ -562,10 +659,16 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			terminal = true
 			break
 		}
 		if r.TTFT == 0 {
-			r.TTFT = time.Since(start)
+			r.TTFT = elapsed(start)
+		}
+		// An error chunk under HTTP 200 must surface, not decode into an
+		// empty chunk and end as an empty answer.
+		if err := erroDePayload(payload); err != nil {
+			return nil, err
 		}
 		var ch sseChunk
 		if err := json.Unmarshal([]byte(payload), &ch); err != nil {
@@ -600,14 +703,15 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 			// both with the same text): the first non-empty one wins.
 			if p := d.Reasoning; p != nil && *p != "" {
 				r.Raciocinio += *p
-				r.DurRaciocinio = time.Since(start)
+				r.DurRaciocinio = elapsed(start)
 			} else if p := d.ReasoningContent; p != nil && *p != "" {
 				r.Raciocinio += *p
-				r.DurRaciocinio = time.Since(start)
+				r.DurRaciocinio = elapsed(start)
 			}
 			if f := ch.Choices[0].FinishReason; f != nil && *f != "" {
 				r.Fim = *f
-				if *f == "length" {
+				terminal = true
+				if *f == "length" || *f == "content_filter" {
 					r.Cortada = true
 				}
 			}
@@ -617,6 +721,9 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 			if d := ch.Usage.PromptTokensDetails; d != nil {
 				r.Usage.CachedTokens = d.CachedTokens
 			}
+			if d := ch.Usage.CompletionTokensDetails; d != nil {
+				r.Usage.ReasoningTokens = d.ReasoningTokens
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -624,6 +731,10 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if !terminal {
+		// Neither [DONE] nor a finish_reason: the connection was cut.
+		return nil, fmt.Errorf("stream: ended without a terminal event: %w", io.ErrUnexpectedEOF)
 	}
 	// close tool calls in index order
 	idx := make([]int, 0, len(pending))
@@ -635,8 +746,13 @@ func readRound(resp *http.Response, ctx context.Context, start time.Time, kick f
 		call := pending[i]
 		r.Tools = append(r.Tools, ToolChamada{ID: call.ID, Nome: call.Function.Name, Args: call.Function.Arguments})
 	}
+	if r.Fim == "content_filter" && r.Texto == "" && len(r.Tools) == 0 {
+		// Nothing to show: looks like an empty answer, and the runtime would
+		// regenerate the very same filtered request. Fail explicitly.
+		return nil, &providerError{kind: "content_filter", summary: "the provider stopped the answer with finish_reason content_filter"}
+	}
 	r.FimPorTexto = len(r.Tools) == 0
-	r.Dur = time.Since(start)
+	r.Dur = elapsed(start)
 	return r, nil
 }
 
@@ -735,10 +851,10 @@ type ModelsResponse struct {
 }
 
 // NormalizarURL tolerates a base with or without a trailing slash and avoids
-// duplicated suffixes (/v1/v1, /chat/completions/chat/completions).
+// duplicated suffixes (/v1/v1, /chat/completions/chat/completions, /responses).
 func NormalizarURL(base string) string {
 	b := strings.TrimSuffix(strings.TrimSpace(base), "/")
-	for _, suffix := range []string{"/chat/completions", "/completions", "/models"} {
+	for _, suffix := range []string{"/chat/completions", "/completions", "/responses", "/models"} {
 		if strings.HasSuffix(b, suffix) {
 			b = strings.TrimSuffix(b, suffix)
 		}

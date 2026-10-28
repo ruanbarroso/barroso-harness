@@ -346,3 +346,138 @@ func TestReplModelEmptyEnterKeeps(t *testing.T) {
 		t.Fatalf("model changed to %q", cfg.Model)
 	}
 }
+
+// /protocol with no argument shows the effective setting; a legacy config
+// (no "protocol" key) reads as chat_completions and nothing is written.
+func TestReplProtocolShowsLegacyDefault(t *testing.T) {
+	srv := fakeModelsProvider(t, "barroso-chat")
+	defer srv.Close()
+	home := readyConfig(t, srv.URL+"/v1", "k", "barroso-chat")
+	before, _ := os.ReadFile(filepath.Join(home, "config.json"))
+
+	io, outIO, errIO := bridgeIO(t, "/protocol\n/exit\n")
+	RunInteractive(io)
+	if !strings.Contains(outIO.String(), "protocol: chat_completions") {
+		t.Fatalf("default not shown:\nout=%s\nerr=%s", outIO.String(), errIO.String())
+	}
+	after, _ := os.ReadFile(filepath.Join(home, "config.json"))
+	if string(before) != string(after) {
+		t.Fatal("/protocol without argument must not rewrite the config")
+	}
+}
+
+// /protocol responses persists on the active provider; aliases map back to
+// chat_completions; the choice survives a reload.
+func TestReplProtocolSwitchAndAliases(t *testing.T) {
+	srv := fakeModelsProvider(t, "barroso-chat")
+	defer srv.Close()
+	home := readyConfig(t, srv.URL+"/v1", "k-secret", "barroso-chat")
+
+	io, outIO, errIO := bridgeIO(t, "/protocol responses\n/protocol\n/exit\n")
+	RunInteractive(io)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProtocoloAtivo() != config.ProtocoloResponses || cfg.Ativo().APIKey != "k-secret" {
+		t.Fatalf("responses not persisted: %+v", cfg.Ativo())
+	}
+	out := outIO.String()
+	if !strings.Contains(out, "protocol=responses") || !strings.Contains(out, "protocol: responses") ||
+		!strings.Contains(out, "no fallback") {
+		t.Fatalf("informative text missing:\nout=%s\nerr=%s", out, errIO.String())
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "config.json"))
+	if !strings.Contains(string(b), `"protocol": "responses"`) {
+		t.Fatalf("not on disk:\n%s", b)
+	}
+
+	for _, alias := range []string{"chat", "completions", "chat_completions"} {
+		io, _, _ := bridgeIO(t, "/protocol responses\n/protocol "+alias+"\n/exit\n")
+		RunInteractive(io)
+		cfg, _ = config.Load()
+		if cfg.ProtocoloAtivo() != config.ProtocoloChatCompletions {
+			t.Fatalf("alias %q -> %q", alias, cfg.ProtocoloAtivo())
+		}
+	}
+}
+
+// An invalid value is an error and leaves the config byte-for-byte unchanged.
+func TestReplProtocolInvalidKeepsConfig(t *testing.T) {
+	srv := fakeModelsProvider(t, "barroso-chat")
+	defer srv.Close()
+	home := readyConfig(t, srv.URL+"/v1", "k", "barroso-chat")
+	before, _ := os.ReadFile(filepath.Join(home, "config.json"))
+
+	io, outIO, errIO := bridgeIO(t, "/protocol messages\n/exit\n")
+	RunInteractive(io)
+	if !strings.Contains(errIO.String()+outIO.String(), "invalid protocol") {
+		t.Fatalf("invalid value not reported:\nout=%s\nerr=%s", outIO.String(), errIO.String())
+	}
+	after, _ := os.ReadFile(filepath.Join(home, "config.json"))
+	if string(before) != string(after) {
+		t.Fatal("config changed despite the invalid protocol")
+	}
+}
+
+// BARROSO_* env wins over config.json, so /protocol <value> is refused (like
+// /provider) and nothing is written.
+func TestReplProtocolRefusedWithEnvOverride(t *testing.T) {
+	srv := fakeModelsProvider(t, "barroso-chat")
+	defer srv.Close()
+	home := readyConfig(t, srv.URL+"/v1", "k", "barroso-chat")
+	before, _ := os.ReadFile(filepath.Join(home, "config.json"))
+	t.Setenv(config.EnvAuthToken, "env-token")
+
+	io, outIO, errIO := bridgeIO(t, "/protocol responses\n/exit\n")
+	RunInteractive(io)
+	if !strings.Contains(errIO.String()+outIO.String(), config.EnvAuthToken) {
+		t.Fatalf("env protection message missing:\nout=%s\nerr=%s", outIO.String(), errIO.String())
+	}
+	after, _ := os.ReadFile(filepath.Join(home, "config.json"))
+	if string(before) != string(after) {
+		t.Fatal("config written despite env override")
+	}
+}
+
+// /protocol is in the registry (help + autocomplete), and re-entering the same
+// provider through /provider keeps its chosen protocol.
+func TestReplProtocolRegisteredAndKeptByProviderSwitch(t *testing.T) {
+	found := false
+	for _, c := range commands() {
+		if c.name == "/protocol" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("/protocol missing from commands()")
+	}
+	hit := false
+	for _, e := range slashCompletions(t.TempDir(), "/proto") {
+		if e.text == "/protocol" {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatal("/protocol missing from autocomplete")
+	}
+
+	srv := fakeModelsProvider(t, "barroso-chat")
+	defer srv.Close()
+	readyConfig(t, srv.URL+"/v1", "k", "barroso-chat")
+	io, _, _ := bridgeIO(t, "/protocol responses\n/exit\n")
+	RunInteractive(io)
+	cfg, _ := config.Load()
+	name := cfg.CurrentProvider
+
+	// Same URL → providerName may differ from "p1"; use the rewritten entry.
+	io2, _, _ := bridgeIO(t, "/provider\n"+srv.URL+"/v1\nk2\n/exit\n")
+	RunInteractive(io2)
+	cfg, _ = config.Load()
+	if cfg.CurrentProvider == name && cfg.ProtocoloAtivo() != config.ProtocoloResponses {
+		t.Fatalf("/provider on the same provider lost the protocol: %q", cfg.ProtocoloAtivo())
+	}
+	if cfg.CurrentProvider != name && cfg.ProtocoloAtivo() != config.ProtocoloChatCompletions {
+		t.Fatalf("new provider must start on the default: %q", cfg.ProtocoloAtivo())
+	}
+}

@@ -12,6 +12,7 @@ package dealer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,6 +87,133 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("provider HTTP %d: %s", e.status, e.summary)
 }
 
+// providerError is an error the provider reported INSIDE an HTTP 200 stream
+// (Chat `{"error":{...}}` chunk, Responses `error` / `response.failed`
+// events), or a content_filter stop with nothing to show. kind is the
+// provider's error code or type ("context_length_exceeded",
+// "rate_limit_exceeded", "server_error", ...); status is the numeric status
+// some gateways embed (0 when absent). The Error() text always carries kind
+// and message, so the runtime's context-overflow detection reads them.
+type providerError struct {
+	status  int
+	kind    string
+	summary string
+	quota   bool
+}
+
+func (e *providerError) Error() string {
+	if e.kind != "" {
+		return fmt.Sprintf("provider error (%s): %s", e.kind, e.summary)
+	}
+	return "provider error: " + e.summary
+}
+
+// retryable: overload-style codes are worth another attempt; quota,
+// invalid requests, context overflow and content filters are not.
+func (e *providerError) retryable() bool {
+	if e.quota {
+		return false
+	}
+	if e.status != 0 {
+		return retryableStatus(e.status)
+	}
+	k := strings.ToLower(e.kind)
+	for _, bad := range []string{"context", "invalid", "content_filter", "quota", "auth", "permission", "not_found", "unsupported"} {
+		if strings.Contains(k, bad) {
+			return false
+		}
+	}
+	for _, good := range []string{"server_error", "overloaded", "rate_limit", "unavailable", "timeout", "internal", "capacity", "too_many_requests", "try_again"} {
+		if strings.Contains(k, good) {
+			return true
+		}
+	}
+	return false
+}
+
+// newProviderError builds the typed error from the parts a payload offers.
+func newProviderError(status int, kind, message string) *providerError {
+	kind = strings.TrimSpace(kind)
+	msg := truncateLine(message, 300)
+	if msg == "" {
+		msg = "(no message)"
+	}
+	e := &providerError{status: status, kind: kind, summary: msg}
+	e.quota = quotaBody.MatchString(kind + " " + message)
+	return e
+}
+
+// rawString renders a JSON string or number (error codes come as either).
+func rawString(raw json.RawMessage) string {
+	t := strings.TrimSpace(string(raw))
+	if t == "" || t == "null" {
+		return ""
+	}
+	if t[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+	}
+	return t
+}
+
+// erroDePayload recognizes an error carried by an SSE payload that arrived
+// under HTTP 200: `{"error":{...}}` (or a string error), or the Responses
+// top-level `{"type":"error","code":...,"message":...}` event. nil = not an
+// error payload.
+func erroDePayload(payload string) error {
+	if !strings.Contains(payload, `"error"`) {
+		return nil
+	}
+	var env struct {
+		Type    string          `json:"type"`
+		Error   json.RawMessage `json:"error"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+		Status  int             `json:"status"`
+	}
+	if json.Unmarshal([]byte(payload), &env) != nil {
+		return nil
+	}
+	if e := strings.TrimSpace(string(env.Error)); e != "" && e != "null" {
+		return erroDeObjeto(env.Error, env.Status)
+	}
+	if env.Type == "error" {
+		return newProviderError(env.Status, rawString(env.Code), env.Message)
+	}
+	return nil
+}
+
+// erroDeObjeto turns a Responses/Chat `error` value (object or string) into
+// the typed error.
+func erroDeObjeto(raw json.RawMessage, status int) *providerError {
+	var o struct {
+		Message string          `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		Type    string          `json:"type"`
+		Status  int             `json:"status"`
+	}
+	if json.Unmarshal(raw, &o) != nil {
+		return newProviderError(status, "", rawString(raw))
+	}
+	kind := rawString(o.Code)
+	if n, err := strconv.Atoi(kind); err == nil && status == 0 {
+		status, kind = n, ""
+	}
+	if kind == "" {
+		kind = o.Type
+	}
+	if o.Status != 0 {
+		status = o.Status
+	}
+	msg := o.Message
+	if msg == "" {
+		msg = string(raw)
+	}
+	return newProviderError(status, kind, msg)
+}
+
 // stallError is the response (idle) deadline firing.
 type stallError struct {
 	kind  error
@@ -125,6 +253,10 @@ func transient(err error) bool {
 		}
 		return retryableStatus(he.status)
 	}
+	var pe *providerError
+	if errors.As(err, &pe) {
+		return pe.retryable()
+	}
 	var se *stallError
 	if errors.As(err, &se) {
 		return true
@@ -159,7 +291,7 @@ func retryWait(err error, attempt int) time.Duration {
 func newHTTPError(resp *http.Response, body []byte) *httpError {
 	e := &httpError{
 		status:     resp.StatusCode,
-		summary:    errorSummary(body, 300),
+		summary:    resumoComCodigo(body),
 		retryAfter: parseRetryAfterMs(resp.Header.Get("Retry-After-Ms")),
 	}
 	if e.retryAfter == 0 {
@@ -175,6 +307,29 @@ func newHTTPError(resp *http.Response, body []byte) *httpError {
 		e.quota = true
 	}
 	return e
+}
+
+// resumoComCodigo is errorSummary plus the error code (or type) of an
+// OpenAI-style JSON body, e.g. "... (context_length_exceeded)": the code is
+// what tells overflow, quota and invalid requests apart.
+func resumoComCodigo(body []byte) string {
+	s := errorSummary(body, 300)
+	var env struct {
+		Error struct {
+			Code json.RawMessage `json:"code"`
+			Type string          `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &env) != nil {
+		return s
+	}
+	for _, tag := range []string{rawString(env.Error.Code), env.Error.Type} {
+		if tag != "" && !strings.Contains(s, tag) {
+			s += " (" + tag + ")"
+			break
+		}
+	}
+	return s
 }
 
 // quotaBody recognizes the "you are out of quota" flavors of 429, as opposed
