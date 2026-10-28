@@ -65,6 +65,12 @@ type RendererRetry interface {
 	Retentando(attempt, max int, wait time.Duration, reason error)
 }
 
+// RendererProtocolFallback is OPTIONAL: it receives a notice when a provider
+// lacks Responses and the dealer uses Chat Completions instead.
+type RendererProtocolFallback interface {
+	ProtocoloAlternativo(from, to string)
+}
+
 // RendererRaciocinio is OPTIONAL: it receives the round's reasoning when the
 // provider exposes it, before tools and the answer (the TUI shows "Thought").
 type RendererRaciocinio interface {
@@ -130,6 +136,10 @@ func NovoRendererPuro(out io.Writer) *RendererPuro { return &RendererPuro{out: o
 func RendererDe(out io.Writer) Renderer { return NovoRendererPuro(out) }
 
 func (p *RendererPuro) Resposta(text string) { fmt.Fprintln(p.out, text) }
+
+func (p *RendererPuro) ProtocoloAlternativo(from, to string) {
+	fmt.Fprintf(p.out, "[protocol] %s endpoint unavailable; using %s\n", from, to)
+}
 
 func (p *RendererPuro) Tool(name string, dur time.Duration, failed bool) {
 	status := "ok"

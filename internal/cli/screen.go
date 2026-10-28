@@ -2461,6 +2461,11 @@ type screenTurn struct {
 
 func (r *screenTurn) Pensando() { r.t.Pensar("Thinking") }
 
+func (r *screenTurn) ProtocoloAlternativo(from, to string) {
+	r.t.stopSpin()
+	r.t.Adicionar("  " + yellowf("⚠") + " " + grayf(from+" endpoint unavailable; using "+to))
+}
+
 // ToolComecou, ToolSaida and ToolTerminou are the live path (runtime's
 // RendererAoVivo): the call's row appears when it starts, with its input, a
 // shell block fills with output as the command prints it, and the result

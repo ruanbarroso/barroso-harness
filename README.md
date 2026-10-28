@@ -3,7 +3,7 @@
 An agent harness written in **Go** from scratch: a single binary, no third-party base, for Windows/macOS/Linux.
 
 - **Permanent YOLO execution**: tools run without approval prompts, allowlists or allow/ask/deny. Technical limits (timeout, output cap, cancellation) are operational — not permissions.
-- **Configurable provider** following the **OpenAI Chat Completions** standard (`base_url` + key + model), SSE streaming with `include_usage`.
+- **Configurable provider** following the **OpenAI Responses API** by default (`base_url` + key + model), with Chat Completions fallback only when the Responses endpoint is unavailable.
 - **Interactive session** with an in-memory transcript and the commands `/model`, `/effort`, `/provider`, `/new`, `/resume`, `/save`, `/update`, `/help`, `/exit`. In a terminal, output uses an ANSI-256 palette and glyphs (`▶` tool, `✗` error, `✓` ok, `◆` guardrail) with a live status line and a per-turn token footer; in a pipe/`-p` it emits raw text, with no escapes.
 - **`BARROSO.md`** becomes the system instruction: from the project directory (and its parents) and/or the global one at `~/.barroso-harness/BARROSO.md`.
 - **Context with a guardrail**: a budget per model window, an estimator calibrated by the real `usage`, and monotonic proactive/reactive compaction. Each turn's transcript is only committed after a complete round.
@@ -49,9 +49,9 @@ In-session commands:
 /effort -              clears it; reasoning_effort is omitted (no silent fallback)
 /provider              changes base URL + key; validates /models before saving
 /provider zen          removes custom providers and restores public OpenCode Zen + big-pickle
-/protocol              shows the request protocol of the active provider (default: chat_completions)
-/protocol responses    sends the next requests with the Responses protocol
-/protocol chat         back to Chat Completions (aliases: chat, completions, chat_completions)
+/protocol              shows the preferred protocol (default: Responses; Chat fallback only if the Responses endpoint is unavailable)
+/protocol responses    prefer Responses; falls back to Chat only if that endpoint is unavailable
+/protocol chat         force Chat Completions (aliases: chat, completions, chat_completions)
 /new                   clears the session transcript (new conversation, config intact)
 /update                downloads and installs the newest release from the channel
 /skills                lists the skills; /<name> [args] runs one
@@ -85,7 +85,7 @@ The chosen version is the **highest number** among stable releases, not the firs
 
 On Windows, the running executable cannot be renamed. When that happens, the command prints the PowerShell `Move-Item` to run afterwards; it also swaps the `bh.exe`/`barroso-harness.exe` alias, which are two files and need two staged copies.
 
-**Request protocol.** Each provider in `config.json` accepts an optional `"protocol"`: `chat_completions` (default, preserving existing configs) or `responses`. `/protocol [chat|chat_completions|completions|responses]` shows or changes the active provider's setting and saves it; unknown values fail. It selects the request format only—it does not probe support and never falls back, so enable Responses only for endpoints validated to support it. `/protocol chat` switches back.
+**Request protocol.** Each provider in `config.json` accepts an optional `"protocol"`. When absent, BH tries `responses` first and falls back to `/chat/completions` only when `/responses` clearly does not exist or is not implemented. Once detected, that fallback is cached for the active session. Authentication, model, request validation, rate-limit, server, timeout and generation errors are not treated as endpoint absence. `/protocol responses` selects this preferred-with-fallback behavior; `/protocol chat` explicitly forces Chat Completions. Existing explicit `chat_completions` settings remain honored.
 
 Whether effort levels are accepted depends on the provider/model. If a request is rejected, the error is shown with no automatic downgrade; use `/effort -` to clear it. Model/provider switches keep the committed text messages; pending tool calls are never left orphaned in the transcript.
 

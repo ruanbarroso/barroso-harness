@@ -25,10 +25,15 @@ func chatServer(t *testing.T, stream string) (*httptest.Server, *atomic.Int32) {
 	return srv, &n
 }
 
+func chatClient(cfg Config) *Cliente {
+	cfg.Protocol = ProtocoloChat
+	return Novo(cfg)
+}
+
 func chatRun(t *testing.T, stream string) (*Rodada, error, int32) {
 	t.Helper()
 	srv, n := chatServer(t, stream)
-	r, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+	r, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 	return r, err, n.Load()
 }
 
@@ -104,7 +109,7 @@ func TestChat200TransientErrorChunkRetries(t *testing.T) {
 		io.WriteString(w, okStream)
 	}))
 	defer srv.Close()
-	r, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("s", nil, nil)
+	r, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("s", nil, nil)
 	if err != nil || r.Texto != "ok" || calls.Load() != 2 {
 		t.Fatalf("requests=%d err=%v", calls.Load(), err)
 	}
@@ -154,10 +159,11 @@ func TestChatLargeLine(t *testing.T) {
 	}
 }
 
-// The default (and an explicit chat protocol) keep the legacy body: chat
-// fields, official decoys and the stream_options include_usage.
+// Explicit Chat selection keeps the legacy body: chat fields, official
+// decoys and stream_options include_usage. An empty preference is tested as
+// Responses separately; this pins the explicit Chat wire contract.
 func TestChatBodyContractUnchangedByProtocolField(t *testing.T) {
-	for _, p := range []string{"", "chat", "chat_completions"} {
+	for _, p := range []string{"chat", "chat_completions"} {
 		b, err := Novo(Config{BaseURL: "https://x/v1", Model: "m", Protocol: p, Effort: "low"}).Corpo("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -179,7 +185,7 @@ func TestChatBodyContractUnchangedByProtocolField(t *testing.T) {
 // Duplicated ids must be renamed BEFORE results are re-paired: pairing by a
 // still-duplicated id attached both results to the last owner.
 func TestChatBodyDuplicateIDsRepairOrder(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	msgs := []Mensagem{
 		{Role: "user", Conteudo: "go"},
 		{Role: "tool_call", ToolID: "dup", ToolName: "shell", ToolArgs: `{"n":1}`},

@@ -19,7 +19,7 @@ func TestRoundReadsCachedTokens(t *testing.T) {
 		}, "\n\n")))
 	}))
 	defer srv.Close()
-	r, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, nil)
+	r, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

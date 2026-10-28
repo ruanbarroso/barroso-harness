@@ -243,6 +243,11 @@ func retryableStatus(code int) bool {
 
 // transient decides whether err is worth another attempt.
 func transient(err error) bool {
+	// These answers describe a missing/unsupported route, not a transient
+	// provider failure. Let Responses fallback run immediately.
+	if responsesEndpointUnavailable(err) {
+		return false
+	}
 	var he *httpError
 	if errors.As(err, &he) {
 		switch {
@@ -288,6 +293,57 @@ func retryWait(err error, attempt int) time.Duration {
 
 // newHTTPError builds the error of a non-200 answer from its status, headers
 // and (already read, capped) body.
+// responsesEndpointUnavailable classifies only errors that say the Responses
+// route/method is absent. It deliberately excludes generic request validation,
+// auth, model, quota, transport and generation failures.
+func responsesEndpointUnavailable(err error) bool {
+	var he *httpError
+	if errors.As(err, &he) {
+		if he.status == http.StatusMethodNotAllowed || he.status == http.StatusNotImplemented {
+			return true
+		}
+		if he.status == http.StatusBadRequest {
+			msg := strings.ToLower(he.summary)
+			for _, marker := range []string{"endpoint_not_found", "unsupported_endpoint", "unsupported endpoint", "route_not_found", "unsupported_route", "unsupported route", "unknown endpoint", "responses endpoint is not supported"} {
+				if strings.Contains(msg, marker) {
+					return true
+				}
+			}
+			return false
+		}
+		if he.status != http.StatusNotFound {
+			return false
+		}
+		msg := strings.ToLower(he.summary)
+		for _, marker := range []string{"model_not_found", "model_not_supported", "model_not_available", "unknown_model", "unsupported_model", "invalid_model", "model not found", "unknown model", "no such model", "invalid model", "unsupported model", "model does not exist", "model doesn't exist"} {
+			if strings.Contains(msg, marker) {
+				return false
+			}
+		}
+		// A 404 for the requested Responses URL means the route is absent. If
+		// the provider names another resource (notably a model), do not guess.
+		return true
+	}
+	var pe *providerError
+	if errors.As(err, &pe) {
+		kind := strings.ToLower(pe.kind)
+		msg := strings.ToLower(pe.summary)
+		if strings.Contains(kind, "model_not_found") || strings.Contains(msg, "model not found") {
+			return false
+		}
+		for _, marker := range []string{"endpoint_not_found", "unsupported_endpoint", "unsupported endpoint", "route_not_found", "unsupported_route", "unsupported route"} {
+			if strings.Contains(kind, marker) {
+				return true
+			}
+		}
+		if strings.Contains(kind, "not_found") &&
+			(strings.Contains(msg, "/responses") || strings.Contains(msg, "responses endpoint") || strings.Contains(msg, "responses route")) {
+			return true
+		}
+	}
+	return false
+}
+
 func newHTTPError(resp *http.Response, body []byte) *httpError {
 	e := &httpError{
 		status:     resp.StatusCode,

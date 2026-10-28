@@ -79,7 +79,7 @@ func jstr(t *testing.T, v any) string {
 
 func TestProtocoloSelector(t *testing.T) {
 	for in, want := range map[string]string{
-		"": ProtocoloChat, "chat": ProtocoloChat, "chat_completions": ProtocoloChat,
+		"": ProtocoloResponses, "chat": ProtocoloChat, "chat_completions": ProtocoloChat,
 		" Chat-Completions ": ProtocoloChat, "completions": ProtocoloChat,
 		"responses": ProtocoloResponses, " RESPONSES ": ProtocoloResponses,
 	} {
@@ -128,13 +128,128 @@ func TestEndpointsByProtocol(t *testing.T) {
 		if _, err := Novo(Config{BaseURL: base, Model: "m", Protocol: "responses"}).Rodar("s", nil, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Novo(Config{BaseURL: base, Model: "m"}).Rodar("s", nil, nil); err != nil {
+		if _, err := Novo(Config{BaseURL: base, Model: "m", Protocol: ProtocoloChat}).Rodar("s", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	want := []string{"/v1/responses", "/v1/chat/completions", "/v1/responses", "/v1/chat/completions", "/v1/responses", "/v1/chat/completions"}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("paths = %v\nwant %v", paths, want)
+	}
+}
+
+func TestResponsesUnavailableFallsBackAndCaches(t *testing.T) {
+	shrink(t)
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/responses") {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode Chat body: %v", err)
+		}
+		if _, ok := body["messages"]; !ok {
+			t.Errorf("fallback body is not Chat Completions: %v", body)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, okStream)
+	}))
+	defer srv.Close()
+
+	client := Novo(Config{BaseURL: srv.URL + "/v1", Model: "m"})
+	first, err := client.Rodar("sys", nil, nil)
+	if err != nil || first.Texto != "ok" || !first.ProtocolFallback {
+		t.Fatalf("first round = %+v, err %v", first, err)
+	}
+	second, err := client.Rodar("sys", nil, nil)
+	if err != nil || second.Texto != "ok" || second.ProtocolFallback {
+		t.Fatalf("cached Chat round = %+v, err %v", second, err)
+	}
+	want := []string{"/v1/responses", "/v1/chat/completions", "/v1/chat/completions"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v; want %v", paths, want)
+	}
+}
+
+func TestResponsesUnavailableRoutesFallback(t *testing.T) {
+	shrink(t)
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "method not allowed", status: http.StatusMethodNotAllowed},
+		{name: "not implemented", status: http.StatusNotImplemented},
+		{name: "named missing route", status: http.StatusBadRequest, body: `{"error":{"code":"unsupported_endpoint","message":"Responses endpoint is not supported"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var responses, chats atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/responses":
+					responses.Add(1)
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.body)
+				case "/v1/chat/completions":
+					chats.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, okStream)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			round, err := Novo(Config{BaseURL: srv.URL + "/v1", Model: "m"}).Rodar("sys", nil, nil)
+			if err != nil || round.Texto != "ok" || !round.ProtocolFallback || responses.Load() != 1 || chats.Load() != 1 {
+				t.Fatalf("responses=%d chats=%d round=%+v err=%v", responses.Load(), chats.Load(), round, err)
+			}
+		})
+	}
+}
+
+func TestResponsesFallbackOnlyForUnavailableRoute(t *testing.T) {
+	shrink(t)
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "invalid request", status: http.StatusBadRequest, body: `{"error":{"code":"invalid_request_error","message":"bad input"}}`},
+		{name: "authentication", status: http.StatusUnauthorized, body: `{"error":{"code":"invalid_api_key","message":"unauthorized"}}`},
+		{name: "model not found", status: http.StatusNotFound, body: `{"error":{"code":"model_not_found","message":"model not found"}}`},
+		{name: "unknown model", status: http.StatusNotFound, body: `{"error":{"code":"unknown_model","message":"unknown model id"}}`},
+		{name: "unsupported model", status: http.StatusNotFound, body: `{"error":{"code":"unsupported_model","message":"model not available"}}`},
+		{name: "server failure", status: http.StatusServiceUnavailable, body: "temporarily unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var responses, chats atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/responses":
+					responses.Add(1)
+					w.Header().Set("X-Should-Retry", "false")
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.body)
+				case "/v1/chat/completions":
+					chats.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, okStream)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			_, err := Novo(Config{BaseURL: srv.URL + "/v1", Model: "m", Protocol: ProtocoloResponses}).Rodar("sys", nil, nil)
+			if err == nil || responses.Load() != 1 || chats.Load() != 0 {
+				t.Fatalf("responses=%d chats=%d err=%v", responses.Load(), chats.Load(), err)
+			}
+		})
 	}
 }
 

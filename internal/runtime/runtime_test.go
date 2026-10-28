@@ -67,7 +67,7 @@ func TestTurnWithToolAndStreaming(t *testing.T) {
 	srv := fakeProvider()
 	defer srv.Close()
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000}, t.TempDir(), "show that the loop runs"); err != nil {
+	if err := Turno(&sb, chatTestConfig(srv.URL, "fake", "k"), t.TempDir(), "show that the loop runs"); err != nil {
 		t.Fatalf("turn failed: %v", err)
 	}
 	out := sb.String()

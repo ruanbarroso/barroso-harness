@@ -32,7 +32,17 @@ func testStore(t *testing.T) *store.Store {
 
 func fakeConfig(t *testing.T, url string) config.Config {
 	t.Helper()
-	return config.Config{BaseURL: url, Model: "fake", APIKey: "k", Janela: 100_000}
+	return chatTestConfig(url, "fake", "k")
+}
+
+func chatTestConfig(baseURL, model, key string) config.Config {
+	return config.Config{
+		CurrentProvider: "test",
+		Providers: map[string]*config.Provider{
+			"test": {BaseURL: baseURL, APIKey: key, Protocol: config.ProtocoloChatCompletions},
+		},
+		Model: model, Janela: 100_000,
+	}
 }
 
 // ── NewSessionWithStore / Attach / ID ─────────────────────────────────────

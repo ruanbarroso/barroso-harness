@@ -277,7 +277,7 @@ func (a *Agente) initialize(w io.Writer, req Request) error {
 	return a.respond(w, NovaResposta(req.ID, map[string]any{
 		"protocolVersion":   v,
 		"agentCapabilities": caps,
-		"authMethods": []any{},
+		"authMethods":       []any{},
 	}))
 }
 
@@ -826,6 +826,16 @@ func (r *acpRenderer) Guardrail(proactive bool) {
 // as the model leaking garbage as reasoning (2026-10-23, conversation 93825).
 // It goes out as session_info_update with a _meta marker (same fallback as the
 // guardrail): a client that does not know the marker ignores it.
+func (r *acpRenderer) ProtocoloAlternativo(from, to string) {
+	text := fmt.Sprintf("[protocol] %s endpoint unavailable; using %s", from, to)
+	r.emit("session_info_update", map[string]any{
+		"_meta": map[string]any{
+			"barroso/protocolFallback": map[string]any{"from": from, "to": to},
+		},
+	})
+	r.a.logf("acp: session %s: %s", r.session, text)
+}
+
 func (r *acpRenderer) Retentando(attempt, max int, wait time.Duration, reason error) {
 	text := fmt.Sprintf("[retry] provider failed (%v); attempt %d/%d in %s", reason, attempt, max, wait.Round(time.Second))
 	r.emit("session_info_update", map[string]any{

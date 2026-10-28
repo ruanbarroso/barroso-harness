@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
@@ -95,7 +94,7 @@ func slowTool(name string, d time.Duration) tools.Spec {
 func TestParallelToolCallsRunConcurrentlyInOrder(t *testing.T) {
 	srv := twoCallProvider("slow_a", "slow_b")
 	defer srv.Close()
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	// slow_a takes longer, so it finishes after slow_b: the report must still
 	// follow call order.
 	s.Injetar(slowTool("slow_a", 600*time.Millisecond), slowTool("slow_b", 400*time.Millisecond))
@@ -130,7 +129,7 @@ func TestParallelToolCallsRunConcurrentlyInOrder(t *testing.T) {
 func TestMutatingToolForcesSequentialRound(t *testing.T) {
 	srv := twoCallProvider("slow_a", "context_write")
 	defer srv.Close()
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(slowTool("slow_a", 50*time.Millisecond))
 	rr := &recRenderer{}
 	if err := s.Send(context.Background(), rr, t.TempDir(), "go"); err != nil {

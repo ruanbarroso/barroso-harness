@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
@@ -36,7 +35,7 @@ func (r *liveRenderer) note(e string) {
 func TestLiveRendererGetsStartOutputEnd(t *testing.T) {
 	srv := twoCallProvider("talker")
 	defer srv.Close()
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(tools.Spec{Name: "talker", Schema: map[string]any{"type": "object"},
 		Exec: func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
 			// Built-in shell streams through the same sink.

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
@@ -72,7 +71,7 @@ func probeTool() tools.Spec {
 // must stay: prompt, tool call and tool result all go into the next request.
 func TestFailedTurnKeepsPromptAndCompletedRounds(t *testing.T) {
 	srv, requests := failingAfterToolProvider(t)
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(probeTool())
 	cwd := t.TempDir()
 
@@ -115,7 +114,7 @@ func TestFailedRequestLeavesNoPartialRound(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"nope"}}`))
 	}))
 	defer srv.Close()
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "hello"); err == nil {
 		t.Fatal("expected the provider error")
 	}

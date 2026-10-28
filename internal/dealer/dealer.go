@@ -1,7 +1,8 @@
-// Package dealer talks to the provider using the OpenAI Chat Completions
-// standard (SSE streaming, tools, include_usage) and exposes the /models
-// catalog in the same standard. The runtime builds the transcript; the dealer
-// only translates both ways. Compaction is the runtime's concern.
+// Package dealer supports the OpenAI Responses API as the runtime's default,
+// with Chat Completions as a route-unavailable fallback, and exposes the
+// /models catalog. An omitted Protocol prefers Responses and falls back to
+// Chat only when the endpoint is unavailable. The runtime builds the transcript;
+// the dealer translates both ways.
 package dealer
 
 import (
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,7 +28,8 @@ import (
 // measured contract of the opencode client, applied to every request and
 // every gateway the harness talks to.
 
-// Request protocols. ProtocoloChat is the default.
+// Request protocols. An empty preference defaults to Responses; Chat
+// Completions is used only when the Responses route is unavailable.
 const (
 	ProtocoloChat      = "chat_completions"
 	ProtocoloResponses = "responses"
@@ -37,12 +40,14 @@ const (
 const sseMaxLinha = 64 << 20
 
 // normalizarProtocolo maps what a config/person wrote to a canonical
-// protocol. ok=false means unknown (no fallback to the other protocol).
+// protocol. ok=false means unknown (never guessed or silently replaced).
 func normalizarProtocolo(s string) (string, bool) {
 	v := strings.ToLower(strings.TrimSpace(s))
 	v = strings.NewReplacer("-", "_", " ", "_").Replace(v)
 	switch v {
-	case "", "chat", "chat_completions", "completions":
+	case "":
+		return ProtocoloResponses, true
+	case "chat", "chat_completions", "completions":
 		return ProtocoloChat, true
 	case "responses":
 		return ProtocoloResponses, true
@@ -66,7 +71,9 @@ type Config struct {
 	MaxTokens    int    `json:"max_tokens"`     // output cap; 0 = per-effort default (TetoPadrao)
 	JanelaTokens int    `json:"context_window"` // 0 = unknown
 	Effort       string `json:"effort"`         // empty = omit reasoning_effort from the request
-	// Protocol selects chat_completions (default) or responses.
+	// Protocol selects chat_completions (forced) or responses (preferred,
+	// with Chat fallback when the Responses endpoint is unavailable). Empty
+	// uses the Responses preference.
 	Protocol string `json:"protocol,omitempty"`
 	// DisableParallelToolCalls sends parallel_tool_calls=false: one tool call
 	// per response, for gateways that drop arguments in parallel batches.
@@ -143,6 +150,9 @@ type Rodada struct {
 	// stream) — the runtime uses it to tell an honest empty answer from a
 	// stream that died mid-think.
 	Fim string
+	// ProtocolFallback reports that this round succeeded after the unavailable
+	// Responses endpoint caused a fallback to Chat Completions.
+	ProtocolFallback bool
 	// Raciocinio is the reasoning the provider exposed (reasoning or
 	// reasoning_content in the delta) and DurRaciocinio the time from the
 	// start of the request to its last chunk. Display only; never sent back
@@ -157,17 +167,24 @@ type Rodada struct {
 
 // Cliente is instantiated per turn.
 type Cliente struct {
-	cfg    Config
-	maxOut int        // output cap for this request (ComTeto); 0 = MaxTokens()
-	aviso  AvisoRetry // reported before each retry (ComAviso); nil = silent
+	cfg           Config
+	maxOut        int            // output cap for this request (ComTeto); 0 = MaxTokens()
+	aviso         AvisoRetry     // reported before each retry (ComAviso); nil = silent
+	protocolState *protocolState // shared by request-scoped copies; caches a missing Responses route
 	// conversa is the conversation identity the canonical opencode session
 	// id (ses_) mints for and stays stable against. Empty = one-shot
 	// traffic: a fresh id per request.
 	conversa string
 }
 
-// Novo returns a client for cfg.
-func Novo(cfg Config) *Cliente { return &Cliente{cfg: cfg} }
+type protocolState struct {
+	chatFallback atomic.Bool
+}
+
+// Novo returns a client for cfg. Copies made for one request share the
+// endpoint-capability result, so an unavailable Responses route is learned
+// once and subsequent rounds go straight to Chat Completions.
+func Novo(cfg Config) *Cliente { return &Cliente{cfg: cfg, protocolState: &protocolState{}} }
 
 // ComConversa returns a copy of the client that carries the conversation
 // identity the canonical session headers build on.
@@ -259,17 +276,27 @@ func (c *Cliente) CorpoEstimativa(system string, msgs []Mensagem, tools []map[st
 // at 4 chars/token).
 var imageEstimateStandIn = strings.Repeat("A", 4<<10)
 
-// corpo dispatches on the protocol. An unknown protocol is an error: there
-// is no fallback to the other one.
+// corpo dispatches on the configured protocol or the cached endpoint capability.
+// Unknown protocol values fail; fallback is handled only after a route error.
 func (c *Cliente) corpo(system string, msgs []Mensagem, tools []map[string]any, inline bool) ([]byte, error) {
 	p, ok := normalizarProtocolo(c.cfg.Protocol)
 	if !ok {
 		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", strings.TrimSpace(c.cfg.Protocol), ProtocoloChat, ProtocoloResponses)
 	}
-	if p == ProtocoloResponses {
+	if p == ProtocoloResponses && c.protocolState != nil && c.protocolState.chatFallback.Load() {
+		p = ProtocoloChat
+	}
+	return c.corpoProtocolo(p, system, msgs, tools, inline)
+}
+
+func (c *Cliente) corpoProtocolo(protocol, system string, msgs []Mensagem, tools []map[string]any, inline bool) ([]byte, error) {
+	if protocol == ProtocoloResponses {
 		return c.corpoResponses(system, msgs, tools, inline)
 	}
-	return c.corpoChat(system, msgs, tools, inline)
+	if protocol == ProtocoloChat {
+		return c.corpoChat(system, msgs, tools, inline)
+	}
+	return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", protocol, ProtocoloChat, ProtocoloResponses)
 }
 
 // converterHistorico turns the internal transcript into Chat-compatible
@@ -561,13 +588,43 @@ func (c *Cliente) RodarContext(ctx context.Context, system string, msgs []Mensag
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	body, err := c.Corpo(system, msgs, tools)
+	protocol, ok := normalizarProtocolo(c.cfg.Protocol)
+	if !ok {
+		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", strings.TrimSpace(c.cfg.Protocol), ProtocoloChat, ProtocoloResponses)
+	}
+	if protocol == ProtocoloResponses && c.protocolState != nil && c.protocolState.chatFallback.Load() {
+		protocol = ProtocoloChat
+	}
+	body, err := c.corpoProtocolo(protocol, system, msgs, tools, true)
 	if err != nil {
 		return nil, err
 	}
-	return c.comRetry(ctx, func(ctx context.Context) (*Rodada, error) {
-		return c.tentativa(ctx, body)
-	})
+	run := func(protocol string, body []byte) (*Rodada, error) {
+		return c.comRetry(ctx, func(ctx context.Context) (*Rodada, error) {
+			return c.tentativa(ctx, body, protocol)
+		})
+	}
+	round, err := run(protocol, body)
+	if err == nil || protocol != ProtocoloResponses || !responsesEndpointUnavailable(err) {
+		return round, err
+	}
+
+	// This only follows a terminal route/method-unavailable response, never an
+	// auth, model, payload, rate-limit, timeout or generation error. No stream
+	// or tool call was accepted, so retrying the same turn in Chat is safe.
+	if c.protocolState != nil {
+		c.protocolState.chatFallback.Store(true)
+	}
+	chatBody, bodyErr := c.corpoProtocolo(ProtocoloChat, system, msgs, tools, true)
+	if bodyErr != nil {
+		return nil, bodyErr
+	}
+	round, err = run(ProtocoloChat, chatBody)
+	if err != nil {
+		return nil, fmt.Errorf("Responses endpoint unavailable; Chat Completions fallback failed: %w", err)
+	}
+	round.ProtocolFallback = true
+	return round, nil
 }
 
 // Rodar runs one round: streams, accumulates text, assembles tool calls and
@@ -579,12 +636,11 @@ func (c *Cliente) Rodar(system string, msgs []Mensagem, tools []map[string]any) 
 
 // tentativa is one attempt: one POST and the read of its stream, under the
 // watchdog.
-func (c *Cliente) tentativa(ctx context.Context, body []byte) (*Rodada, error) {
+func (c *Cliente) tentativa(ctx context.Context, body []byte, proto string) (*Rodada, error) {
 	wctx, wd := newWatchdog(ctx, pick(c.cfg.Idle, idleTimeout))
 	defer wd.stop()
-	proto, ok := normalizarProtocolo(c.cfg.Protocol)
-	if !ok {
-		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", strings.TrimSpace(c.cfg.Protocol), ProtocoloChat, ProtocoloResponses)
+	if proto != ProtocoloChat && proto != ProtocoloResponses {
+		return nil, fmt.Errorf("unknown protocol %q (use %s or %s)", proto, ProtocoloChat, ProtocoloResponses)
 	}
 	endpoint := NormalizarURL(c.cfg.BaseURL) + "/chat/completions"
 	if proto == ProtocoloResponses {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ import (
 // default (https://keys.barroso.tec.br/v1) — and the screen shows that
 // default in brackets, never a generic placeholder.
 func TestOnboardingEmptyEnterUsesDefaultBaseURL(t *testing.T) {
-	srv, _ := smokeServer(t, smokeCatalog)
+	srv, _, _ := smokeServer(t, smokeCatalog)
 	defer srv.Close()
 	emptyConfigHome(t)
 
@@ -85,12 +86,14 @@ func emptyConfigHome(t *testing.T) {
 	}
 }
 
-// smokeServer serves /v1/models and /v1/chat/completions with a predictable
-// script and returns the captured requests (to inspect reasoning_effort).
-func smokeServer(t *testing.T, catalog string) (*httptest.Server, *[]map[string]any) {
+// smokeServer serves /v1/models and Chat Completions, intentionally lacking
+// Responses so onboarding verifies the documented endpoint fallback.
+func smokeServer(t *testing.T, catalog string) (*httptest.Server, *[]map[string]any, *[]string) {
 	t.Helper()
 	seen := &[]map[string]any{}
+	paths := &[]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*paths = append(*paths, r.URL.Path)
 		switch r.URL.Path {
 		case "/v1/models":
 			if r.Header.Get("Authorization") != "Bearer fake-key" {
@@ -108,7 +111,7 @@ func smokeServer(t *testing.T, catalog string) (*httptest.Server, *[]map[string]
 			http.NotFound(w, r)
 		}
 	}))
-	return srv, seen
+	return srv, seen, paths
 }
 
 const smokeCatalog = `{"data":[
@@ -121,7 +124,7 @@ const smokeCatalog = `{"data":[
 // onboarding, a turn, /effort high (in the request), /effort - (out of the
 // request), /model by index and /exit — no key in the output.
 func TestSmokeOnboardingTurnModelEffort(t *testing.T) {
-	srv, seen := smokeServer(t, smokeCatalog)
+	srv, seen, paths := smokeServer(t, smokeCatalog)
 	defer srv.Close()
 	emptyConfigHome(t)
 	old := PromptKey
@@ -149,7 +152,13 @@ func TestSmokeOnboardingTurnModelEffort(t *testing.T) {
 		t.Fatalf("the fake key leaked to the output:\n%s", screen)
 	}
 	if n := len(*seen); n != 3 {
-		t.Fatalf("expected 3 turns at the provider, got %d", n)
+		t.Fatalf("expected 3 Chat fallback turns at the provider, got %d", n)
+	}
+	if want := []string{"/v1/models", "/v1/models", "/v1/responses", "/v1/chat/completions", "/v1/chat/completions", "/v1/chat/completions", "/v1/models"}; !reflect.DeepEqual(*paths, want) {
+		t.Fatalf("onboarding endpoint sequence = %v; want %v", *paths, want)
+	}
+	if !strings.Contains(screen, "responses endpoint unavailable; using chat_completions") {
+		t.Fatalf("fallback notice missing from output:\n%s", screen)
 	}
 	if _, ok := (*seen)[0]["reasoning_effort"]; ok {
 		t.Fatal("turn 1 should go out without reasoning_effort (off by default)")

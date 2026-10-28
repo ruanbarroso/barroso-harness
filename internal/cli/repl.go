@@ -309,10 +309,10 @@ func updateProvider(cfg config.Config, name, base, key string) config.Config {
 		cfg.Providers = map[string]*config.Provider{}
 	}
 	// Re-entering an existing provider keeps its chosen request protocol; a
-	// new one starts on the default.
+	// new one prefers Responses, with Chat fallback only if its route is absent.
 	proto := config.DefaultProtocol
 	if old := cfg.Providers[name]; old != nil {
-		proto = config.PadraoProtocolo(old.Protocol)
+		proto = old.Protocol
 	}
 	cfg.Providers[name] = &config.Provider{BaseURL: base, APIKey: key, Protocol: proto}
 	cfg.CurrentProvider = name
@@ -954,13 +954,13 @@ func cmdProvider(io IO, cfg *config.Config, arg string) error {
 }
 
 // cmdProtocol shows or sets the request protocol of the ACTIVE provider:
-// /protocol [chat|chat_completions|completions|responses]. It only chooses how
-// requests are written; it does not check that the provider supports the
-// protocol and never falls back to the other one.
+// /protocol [chat|chat_completions|completions|responses]. Responses is the
+// default and falls back to Chat only when its endpoint is unavailable. An
+// explicit Chat selection forces the Chat Completions endpoint.
 func cmdProtocol(io IO, cfg *config.Config, arg string) error {
 	current := cfg.ProtocoloAtivo()
 	if strings.TrimSpace(arg) == "" {
-		fmt.Fprintf(io.Out, "protocol: %s \u00b7 options: chat (chat_completions), responses \u00b7 `/protocol responses` switches\n", current)
+		fmt.Fprintf(io.Out, "protocol: %s \u00b7 options: responses (default; Chat fallback if endpoint is unavailable), chat (force Chat Completions)\n", current)
 		return nil
 	}
 	if cfg.FromEnv() {
@@ -979,7 +979,11 @@ func cmdProtocol(io IO, cfg *config.Config, arg string) error {
 		fmt.Fprintf(io.Out, "protocol unchanged: %s\n", next)
 		return nil
 	}
-	fmt.Fprintf(io.Out, "protocol=%s; applies to the next request. It only picks the request protocol: support is not checked and there is no fallback (a provider that rejects it returns an error; `/protocol chat` goes back).\n", next)
+	if next == config.ProtocoloResponses {
+		fmt.Fprintln(io.Out, "protocol=responses; applies to the next request. Chat Completions is used only if the Responses endpoint is unavailable; other provider errors are returned. `/protocol chat` forces Chat.")
+		return nil
+	}
+	fmt.Fprintln(io.Out, "protocol=chat_completions; applies to the next request and forces Chat Completions. `/protocol responses` prefers Responses and falls back only if that endpoint is unavailable.")
 	return nil
 }
 

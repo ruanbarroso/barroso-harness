@@ -109,7 +109,7 @@ func TestSessaoEstavel(t *testing.T) {
 // official byte-exact literals, tool_choice is auto, stream is always on,
 // and appended decoys get their brake on the system slot.
 func TestCorpoFingerprint(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m", APIKey: "z", Effort: "high"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m", APIKey: "z", Effort: "high"})
 	tools := []map[string]any{
 		{"type": "function", "function": map[string]any{
 			"name": "edit", "description": "custom edit", "parameters": map[string]any{"type": "object"},
@@ -178,7 +178,7 @@ func TestCorpoFingerprint(t *testing.T) {
 // TestCorpoSemTools: a request with no tools STILL travels with the official
 // pair (auto, appended decoys) — the measured no-tools rejection.
 func TestCorpoSemTools(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m", APIKey: "z"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m", APIKey: "z"})
 	raw, err := c.Corpo("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestRodarEnviaContrato(t *testing.T) {
 		io.Flush()
 	}))
 	defer srv.Close()
-	c := Novo(Config{BaseURL: srv.URL, Model: "m", APIKey: "z"}).ComConversa("conv-rodar")
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m", APIKey: "z"}).ComConversa("conv-rodar")
 	if _, err := c.Rodar("sys", []Mensagem{{Role: "user", Conteudo: "1"}}, nil); err != nil {
 		t.Fatal(err)
 	}

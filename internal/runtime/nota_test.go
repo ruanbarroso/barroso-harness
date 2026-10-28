@@ -67,7 +67,7 @@ func textAndToolProvider() *httptest.Server {
 func TestIntermediateTextBecomesNotaBeforeTools(t *testing.T) {
 	srv := textAndToolProvider()
 	defer srv.Close()
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(tools.Spec{Name: "probe", Schema: map[string]any{"type": "object"},
 		Exec: func(context.Context, string, json.RawMessage) (string, error) { return "ok", nil }})
 	rr := &notaRenderer{}

@@ -113,7 +113,7 @@ func newServer(t *testing.T, text string, delay time.Duration, requestTool bool)
 	cfg := config.Config{
 		CurrentProvider: "fake",
 		Providers: map[string]*config.Provider{
-			"fake": {BaseURL: srv.URL, APIKey: "k"},
+			"fake": {BaseURL: srv.URL, APIKey: "k", Protocol: config.ProtocoloChatCompletions},
 		},
 		Model:     "fake-model",
 		Janela:    100_000,

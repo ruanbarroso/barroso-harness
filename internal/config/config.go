@@ -78,27 +78,25 @@ type Provider struct {
 	// DisableParallelToolCalls turns parallel tool calls off for this
 	// provider only (see Config.DisableParallelToolCalls).
 	DisableParallelToolCalls bool `json:"disable_parallel_tool_calls,omitempty"`
-	// Protocol is the request protocol the turn is written in for THIS
-	// provider. Absent = chat_completions (the default every existing
-	// config used); the only values are chat_completions and responses.
-	// It does not verify anything: it only chooses how the request is
-	// written, with no fallback — a provider that rejects it errors.
+	// Protocol is the preferred request protocol for THIS provider. Absent
+	// means Responses first, with Chat Completions fallback only when the
+	// endpoint is unavailable. An explicit chat_completions forces Chat.
 	Protocol string `json:"protocol,omitempty"`
 }
 
 // Request protocol of Config.Provider.Protocol (and of /protocol). These two
 // are the only accepted values; anything else is rejected, never guessed.
 const (
-	// ProtocoloChatCompletions is the OpenAI Chat Completions dialect —
-	// the default, and what every config without "protocol" keeps using.
+	// ProtocoloChatCompletions is the OpenAI Chat Completions dialect. It
+	// can be selected explicitly to force Chat without probing Responses.
 	ProtocoloChatCompletions = "chat_completions"
 	// ProtocoloResponses is the OpenAI Responses dialect.
 	ProtocoloResponses = "responses"
 )
 
-// DefaultProtocol is the effective protocol of a provider that does not set
-// one: an existing config, or a first install, keeps Chat Completions.
-const DefaultProtocol = ProtocoloChatCompletions
+// DefaultProtocol is the preferred protocol of a provider that does not set
+// one: try Responses, and use Chat only when its endpoint is unavailable.
+const DefaultProtocol = ProtocoloResponses
 
 // aliasProtocol maps what a person types to the stored value. Case, spaces,
 // `_` and `-` are irrelevant ("Chat Completions" == chat_completions);
@@ -130,9 +128,8 @@ func NormalizarProtocolo(s string) (string, bool) {
 	return "", false
 }
 
-// PadraoProtocolo resolves the EFFECTIVE protocol of a stored value: empty
-// (or unknown) is the chat_completions default — an old config, or a fresh
-// install, keeps working exactly as before.
+// PadraoProtocolo resolves the preferred protocol of a stored value: empty
+// (or unknown) prefers Responses; capability fallback is handled by the dealer.
 func PadraoProtocolo(stored string) string {
 	if v, ok := NormalizarProtocolo(stored); ok && v != "" {
 		return v
@@ -304,9 +301,9 @@ func (c *Config) Ativo() *Provider {
 	return nil
 }
 
-// ProtocoloAtivo is the EFFECTIVE request protocol of the active provider:
-// chat_completions or responses, never empty. It only reports the choice; it
-// does not check that the provider supports it.
+// ProtocoloAtivo is the preferred request protocol of the active provider:
+// chat_completions or responses, never empty. Responses may use Chat only when
+// its endpoint is unavailable; an explicit Chat value always forces Chat.
 func (c *Config) ProtocoloAtivo() string {
 	if p := c.Ativo(); p != nil {
 		return PadraoProtocolo(p.Protocol)
@@ -448,16 +445,18 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	migrateLegacyShape(b, &c)
-	// Every provider gets its EFFECTIVE protocol: absent = chat_completions
-	// (old configs keep working); an invalid value is an error, never a guess.
+	// Validate and canonicalize any saved protocol. A saved Chat value remains
+	// an explicit preference; only a missing value inherits the new Responses
+	// default. Older versions cannot distinguish implicit from chosen Chat.
 	for name, p := range c.Providers {
 		if p == nil {
 			continue
 		}
-		if _, ok := NormalizarProtocolo(p.Protocol); !ok {
+		proto, ok := NormalizarProtocolo(p.Protocol)
+		if !ok {
 			return c, fmt.Errorf("invalid config %s: provider %q has protocol %q; use %s or %s", path, name, p.Protocol, ProtocoloChatCompletions, ProtocoloResponses)
 		}
-		p.Protocol = PadraoProtocolo(p.Protocol)
+		p.Protocol = proto
 	}
 	// No "effort" key at all: the default level. "none" is the explicit
 	// "send no reasoning_effort" (what /effort - stores).

@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
@@ -44,7 +43,7 @@ func TestToolTextIsReasked(t *testing.T) {
 	leaked := "(tool_call) name=shell arguments={\"command\": \"echo hi\"}"
 	srv, seen := cutProvider(t, []step{{leaked, false, "stop"}, {"done", false, "stop"}})
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi"); err != nil {
+	if err := Turno(&sb, chatTestConfig(srv.URL, "m", "k"), t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 	v := *seen
@@ -91,7 +90,7 @@ func TestToolUsesEnvelopeWithStructuredToolsIsSuppressed(t *testing.T) {
 	defer srv.Close()
 
 	var ran atomic.Bool
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(tools.Spec{Name: "probe", Schema: map[string]any{"type": "object"}, Exec: func(context.Context, string, json.RawMessage) (string, error) {
 		ran.Store(true)
 		return "ran", nil
@@ -121,7 +120,7 @@ func TestToolTextGivesUpAfterCap(t *testing.T) {
 	leaked := "(tool_call) name=shell arguments={\"command\": \"echo hi\"}"
 	srv, seen := cutProvider(t, []step{{leaked, false, "stop"}})
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi"); err != nil {
+	if err := Turno(&sb, chatTestConfig(srv.URL, "m", "k"), t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(*seen); n != 1+maxToolTextRetries {

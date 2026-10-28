@@ -39,7 +39,7 @@ func TestRetry503ThenOK(t *testing.T) {
 	}))
 	defer srv.Close()
 	var avisos []int
-	c := Novo(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(a, max int, _ time.Duration, err error) {
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(a, max int, _ time.Duration, err error) {
 		avisos = append(avisos, a)
 		if !strings.Contains(err.Error(), "503") {
 			t.Errorf("reason %v", err)
@@ -66,7 +66,7 @@ func TestSilentProviderGivesUp(t *testing.T) {
 	}))
 	defer srv.Close()
 	start := time.Now()
-	_, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+	_, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 	if err == nil || !errors.Is(err, errIdle) || !strings.Contains(err.Error(), "gave up after 2 attempts") {
 		t.Fatalf("err %v", err)
 	}
@@ -96,7 +96,7 @@ func TestIdleTimeoutMidStreamRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 	var reason error
-	c := Novo(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(_, _ int, _ time.Duration, err error) { reason = err })
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(_, _ int, _ time.Duration, err error) { reason = err })
 	r, err := c.Rodar("sys", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestSlowButSteadyStreamIsNotCut(t *testing.T) {
 		w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer srv.Close()
-	r, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+	r, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 	if err != nil || r.Texto != "xxxxx" {
 		t.Fatalf("texto=%q err=%v", r.Texto, err)
 	}
@@ -134,7 +134,7 @@ func TestNonTransientNotRetried(t *testing.T) {
 			n.Add(1)
 			w.WriteHeader(code)
 		}))
-		_, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+		_, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 		srv.Close()
 		if err == nil || n.Load() != 1 || strings.Contains(err.Error(), "gave up") {
 			t.Fatalf("%d: requests=%d err=%v", code, n.Load(), err)
@@ -190,7 +190,7 @@ func statusServer(t *testing.T, code, count int, hdr map[string]string, body str
 func TestRetry500(t *testing.T) {
 	shrink(t)
 	srv, n := statusServer(t, 500, 1, nil, "boom")
-	if _, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err != nil || n.Load() != 2 {
+	if _, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err != nil || n.Load() != 2 {
 		t.Fatalf("requests=%d err=%v", n.Load(), err)
 	}
 }
@@ -198,7 +198,7 @@ func TestRetry500(t *testing.T) {
 func TestQuota429IsTerminal(t *testing.T) {
 	shrink(t)
 	srv, n := statusServer(t, 429, 9, nil, `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`)
-	_, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+	_, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 	if err == nil || n.Load() != 1 {
 		t.Fatalf("requests=%d err=%v", n.Load(), err)
 	}
@@ -207,11 +207,11 @@ func TestQuota429IsTerminal(t *testing.T) {
 func TestShouldRetryHeaderWins(t *testing.T) {
 	shrink(t)
 	srv, n := statusServer(t, 503, 9, map[string]string{"X-Should-Retry": "false"}, "")
-	if _, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err == nil || n.Load() != 1 {
+	if _, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err == nil || n.Load() != 1 {
 		t.Fatalf("false: requests=%d err=%v", n.Load(), err)
 	}
 	srv, n = statusServer(t, 400, 1, map[string]string{"X-Should-Retry": "true"}, "")
-	if _, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err != nil || n.Load() != 2 {
+	if _, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil); err != nil || n.Load() != 2 {
 		t.Fatalf("true: requests=%d err=%v", n.Load(), err)
 	}
 }
@@ -239,7 +239,7 @@ func TestPingsDoNotFeedTheWatchdog(t *testing.T) {
 		w.Write([]byte(okStream))
 	}))
 	defer srv.Close()
-	r, err := Novo(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+	r, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
 	if err != nil || r.Texto != "ok" || n.Load() != 2 {
 		t.Fatalf("requests=%d err=%v", n.Load(), err)
 	}
@@ -252,7 +252,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
 	defer srv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	c := Novo(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(int, int, time.Duration, error) { cancel() })
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m"}).ComAviso(func(int, int, time.Duration, error) { cancel() })
 	_, err := c.RodarContext(ctx, "sys", nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err %v", err)

@@ -219,15 +219,14 @@ func TestSelectProviderKeepsManualWindow(t *testing.T) {
 	}
 }
 
-// Existing configs (no "protocol" key) and a first install both resolve to
-// chat_completions.
-func TestProtocolDefaultsToChatCompletions(t *testing.T) {
+// Existing configs without a protocol and first installs prefer Responses.
+func TestProtocolDefaultsToResponses(t *testing.T) {
 	dir, _ := home(t)
 	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ProtocoloAtivo() != ProtocoloChatCompletions || c.Ativo().Protocol != ProtocoloChatCompletions {
+	if c.ProtocoloAtivo() != ProtocoloResponses || c.Ativo().Protocol != ProtocoloResponses {
 		t.Fatalf("first install protocol = %q", c.ProtocoloAtivo())
 	}
 
@@ -239,8 +238,19 @@ func TestProtocolDefaultsToChatCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.ProtocoloAtivo(); got != ProtocoloChatCompletions {
-		t.Fatalf("legacy config protocol = %q, want chat_completions", got)
+	if got := c.ProtocoloAtivo(); got != ProtocoloResponses || c.Ativo().Protocol != "" {
+		t.Fatalf("legacy config protocol = %q (stored %q), want Responses preference with no explicit override", got, c.Ativo().Protocol)
+	}
+
+	// Any stored Chat protocol remains honored, including configs written by
+	// an older version that cannot distinguish a default from a manual choice.
+	legacyChat := `{"current_provider":"p","providers":{"p":{"base_url":"https://x/v1","api_key":"k","protocol":"chat_completions"}},"model":"m"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(legacyChat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load()
+	if err != nil || c.ProtocoloAtivo() != ProtocoloChatCompletions {
+		t.Fatalf("explicit Chat preference: %v, protocol %q", err, c.ProtocoloAtivo())
 	}
 }
 
@@ -319,7 +329,7 @@ func TestProtocolSurvivesEnvOverlay(t *testing.T) {
 	// Env with no configured provider: default protocol.
 	os.Remove(filepath.Join(dir, "config.json"))
 	got, _ = Load()
-	if got.ProtocoloAtivo() != ProtocoloChatCompletions {
+	if got.ProtocoloAtivo() != ProtocoloResponses {
 		t.Fatalf("env-only protocol = %q", got.ProtocoloAtivo())
 	}
 	if _, err := got.ComProtocolo("responses"); err == nil {

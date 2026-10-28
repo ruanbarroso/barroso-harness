@@ -9,8 +9,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 )
 
 // seenRequest records the max_tokens and the last message of each request.
@@ -77,7 +75,10 @@ type step = struct {
 func TestEmptyCutRetriesWithLargerLimit(t *testing.T) {
 	srv, seen := cutProvider(t, []step{{"", false, "length"}, {"done", false, "stop"}})
 	var sb strings.Builder
-	err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k", Effort: "max"}, t.TempDir(), "hi")
+	cfg := chatTestConfig(srv.URL, "m", "k")
+	cfg.Janela = 0 // isolate output-limit growth from the context-window clamp
+	cfg.Effort = "max"
+	err := Turno(&sb, cfg, t.TempDir(), "hi")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestEmptyCutRetriesWithLargerLimit(t *testing.T) {
 func TestCutWithTextContinues(t *testing.T) {
 	srv, seen := cutProvider(t, []step{{"part one ", true, "length"}, {"part two", false, "stop"}})
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi"); err != nil {
+	if err := Turno(&sb, chatTestConfig(srv.URL, "m", "k"), t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 	v := *seen
@@ -118,7 +119,9 @@ func TestCutNeverGivesUp(t *testing.T) {
 	steps = append(steps, step{"done", false, "stop"})
 	srv, seen := cutProvider(t, steps)
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi"); err != nil {
+	cfg := chatTestConfig(srv.URL, "m", "k")
+	cfg.Janela = 0 // this test checks unbounded retry behavior, not window clamping
+	if err := Turno(&sb, cfg, t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(*seen); n != 7 || !strings.Contains(sb.String(), "done") {
@@ -132,7 +135,7 @@ func TestCutNeverGivesUp(t *testing.T) {
 func TestEmptyFinalRegensTransparent(t *testing.T) {
 	srv, seen := cutProvider(t, []step{{"", false, "stop"}, {"", false, "stop"}, {"pronto", false, "stop"}})
 	var sb strings.Builder
-	if err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi"); err != nil {
+	if err := Turno(&sb, chatTestConfig(srv.URL, "m", "k"), t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 	v := *seen
@@ -158,7 +161,7 @@ func TestEmptyFinalGivesUpHonestly(t *testing.T) {
 	}
 	srv, seen := cutProvider(t, steps)
 	var sb strings.Builder
-	err := Turno(&sb, config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"}, t.TempDir(), "hi")
+	err := Turno(&sb, chatTestConfig(srv.URL, "m", "k"), t.TempDir(), "hi")
 	if err == nil {
 		t.Fatal("an always-empty provider must fail the turn")
 	}
@@ -199,7 +202,7 @@ func TestReasoningGoesToRenderer(t *testing.T) {
 	defer srv.Close()
 	var sb strings.Builder
 	r := &thinkingRenderer{RendererPuro: NovoRendererPuro(&sb)}
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	s := NewSession(chatTestConfig(srv.URL, "m", "k"))
 	if err := s.Send(context.Background(), r, t.TempDir(), "hi"); err != nil {
 		t.Fatal(err)
 	}

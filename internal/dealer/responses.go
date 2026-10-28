@@ -1,5 +1,6 @@
 // responses.go speaks the OpenAI Responses API (POST {base}/responses) as the
-// alternative to Chat Completions. It reuses the transcript preparation of
+// preferred protocol. Chat Completions remains available when that route is
+// absent. It reuses the transcript preparation of
 // the chat path (parallel-call merge, duplicate-id repair, result re-pairing)
 // but NOT its wire fingerprint: the Zen decoy tools and the system-side
 // brake are a Chat-only contract and are never added here. The shared

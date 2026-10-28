@@ -24,11 +24,12 @@ import (
 
 // Session holds the transcript and reconfigurable state of a REPL.
 type Session struct {
-	config  config.Config
-	dealer  *dealer.Cliente
-	history []dealer.Mensagem
-	est     budget.Estimador
-	key     string // calibration per (normalized URL, model)
+	config              config.Config
+	dealer              *dealer.Cliente
+	history             []dealer.Mensagem
+	est                 budget.Estimador
+	key                 string // calibration per (normalized URL, model)
+	protocolFallbackKey string // Responses route known absent for this provider/model in this session
 
 	// Persistence is OPTIONAL. A nil store means an in-memory-only session (the
 	// NewSession path, used by -p mode and by tests). With a store, every
@@ -157,6 +158,15 @@ func (s *Session) rebuild() {
 	if p != nil {
 		base, key = p.BaseURL, p.APIKey
 	}
+	protocol := s.config.ProtocoloAtivo()
+	capabilityKey := protocolCapabilityKey(base, s.config.Model, protocol)
+	if s.protocolFallbackKey != "" {
+		if s.protocolFallbackKey == capabilityKey {
+			protocol = dealer.ProtocoloChat
+		} else {
+			s.protocolFallbackKey = ""
+		}
+	}
 	id := dealer.NormalizarURL(base) + "\x00" + s.config.Model
 	if id != s.key {
 		s.est = budget.Estimador{}
@@ -166,16 +176,20 @@ func (s *Session) rebuild() {
 		s.key = id
 	}
 	// The configured protocol decides which dialect the request is written
-	// in; chat_completions is the default for a provider that sets none.
+	// in; an unset provider prefers Responses with Chat fallback if its route is absent.
 	s.dealer = dealer.Novo(dealer.Config{
 		BaseURL: base, APIKey: key, Model: s.config.Model,
-		Protocol:                 s.config.ProtocoloAtivo(),
+		Protocol:                 protocol,
 		MaxTokens:                s.config.MaxTokens,
 		JanelaTokens:             s.config.Janela,
 		Effort:                   s.config.Effort,
 		DisableParallelToolCalls: s.config.ParallelToolCallsOff(),
 		Idle:                     secs(s.config.IdleSecs),
 	})
+}
+
+func protocolCapabilityKey(baseURL, model, protocol string) string {
+	return dealer.NormalizarURL(baseURL) + "\x00" + model + "\x00" + protocol
 }
 
 // History returns a copy for tests/safe observability; it does not expose the
@@ -534,6 +548,17 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				}
 			}
 			return err
+		}
+		if round.ProtocolFallback {
+			base := ""
+			if p := s.config.Ativo(); p != nil {
+				base = p.BaseURL
+			}
+			s.protocolFallbackKey = protocolCapabilityKey(base, s.config.Model, s.config.ProtocoloAtivo())
+			s.record("protocol_fallback", map[string]any{"from": dealer.ProtocoloResponses, "to": dealer.ProtocoloChat})
+			if rf, ok := r.(RendererProtocolFallback); ok {
+				rf.ProtocoloAlternativo(dealer.ProtocoloResponses, dealer.ProtocoloChat)
+			}
 		}
 		if rr, ok := r.(RendererRaciocinio); ok && strings.TrimSpace(round.Raciocinio) != "" {
 			rr.Pensou(round.Raciocinio, round.DurRaciocinio)

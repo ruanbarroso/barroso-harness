@@ -348,7 +348,7 @@ func TestReplModelEmptyEnterKeeps(t *testing.T) {
 }
 
 // /protocol with no argument shows the effective setting; a legacy config
-// (no "protocol" key) reads as chat_completions and nothing is written.
+// (no "protocol" key) prefers Responses and nothing is written.
 func TestReplProtocolShowsLegacyDefault(t *testing.T) {
 	srv := fakeModelsProvider(t, "barroso-chat")
 	defer srv.Close()
@@ -357,7 +357,7 @@ func TestReplProtocolShowsLegacyDefault(t *testing.T) {
 
 	io, outIO, errIO := bridgeIO(t, "/protocol\n/exit\n")
 	RunInteractive(io)
-	if !strings.Contains(outIO.String(), "protocol: chat_completions") {
+	if !strings.Contains(outIO.String(), "protocol: responses") {
 		t.Fatalf("default not shown:\nout=%s\nerr=%s", outIO.String(), errIO.String())
 	}
 	after, _ := os.ReadFile(filepath.Join(home, "config.json"))
@@ -373,7 +373,7 @@ func TestReplProtocolSwitchAndAliases(t *testing.T) {
 	defer srv.Close()
 	home := readyConfig(t, srv.URL+"/v1", "k-secret", "barroso-chat")
 
-	io, outIO, errIO := bridgeIO(t, "/protocol responses\n/protocol\n/exit\n")
+	io, outIO, errIO := bridgeIO(t, "/protocol chat\n/protocol responses\n/protocol\n/exit\n")
 	RunInteractive(io)
 	cfg, err := config.Load()
 	if err != nil {
@@ -384,7 +384,7 @@ func TestReplProtocolSwitchAndAliases(t *testing.T) {
 	}
 	out := outIO.String()
 	if !strings.Contains(out, "protocol=responses") || !strings.Contains(out, "protocol: responses") ||
-		!strings.Contains(out, "no fallback") {
+		!strings.Contains(out, "Chat Completions is used only if the Responses endpoint is unavailable") {
 		t.Fatalf("informative text missing:\nout=%s\nerr=%s", out, errIO.String())
 	}
 	b, _ := os.ReadFile(filepath.Join(home, "config.json"))
@@ -477,7 +477,7 @@ func TestReplProtocolRegisteredAndKeptByProviderSwitch(t *testing.T) {
 	if cfg.CurrentProvider == name && cfg.ProtocoloAtivo() != config.ProtocoloResponses {
 		t.Fatalf("/provider on the same provider lost the protocol: %q", cfg.ProtocoloAtivo())
 	}
-	if cfg.CurrentProvider != name && cfg.ProtocoloAtivo() != config.ProtocoloChatCompletions {
+	if cfg.CurrentProvider != name && cfg.ProtocoloAtivo() != config.ProtocoloResponses {
 		t.Fatalf("new provider must start on the default: %q", cfg.ProtocoloAtivo())
 	}
 }

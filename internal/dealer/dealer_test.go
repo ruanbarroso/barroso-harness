@@ -139,7 +139,7 @@ func TestCatalogShortTimeout(t *testing.T) {
 
 func requestBody(t *testing.T, cfg Config, tools []map[string]any) map[string]any {
 	t.Helper()
-	c := Novo(cfg)
+	c := chatClient(cfg)
 	b, err := c.Corpo("sys", nil, tools)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func TestRunSendsEffort(t *testing.T) {
 		w.Write([]byte("data: " + string(payload) + "\n\ndata: [DONE]\n\n"))
 	}))
 	defer srv.Close()
-	c := Novo(Config{BaseURL: srv.URL, Model: "m", APIKey: "k", Effort: "low"})
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m", APIKey: "k", Effort: "low"})
 	if _, err := c.Rodar("sys", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRunCapturesFinishReason(t *testing.T) {
 			w.Write([]byte("data: " + string(payload) + "\n\ndata: [DONE]\n\n"))
 		}))
 		defer srv.Close()
-		c := Novo(Config{BaseURL: srv.URL, Model: "m", APIKey: "k"})
+		c := chatClient(Config{BaseURL: srv.URL, Model: "m", APIKey: "k"})
 		rd, err := c.Rodar("sys", nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -310,7 +310,7 @@ func TestRequestsSendUserAgent(t *testing.T) {
 	}
 
 	// chat completions
-	c := Novo(Config{BaseURL: srv.URL, Model: "m1", APIKey: "k"}).ComConversa("sessao-teste")
+	c := chatClient(Config{BaseURL: srv.URL, Model: "m1", APIKey: "k"}).ComConversa("sessao-teste")
 	if _, err := c.Rodar("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, nil); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestBodyUserMessageWithImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := dir + string(os.PathSeparator) + "gone.png"
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	b, err := c.Corpo("sys", []Mensagem{{Role: "user", Conteudo: "what is [Image 1] vs [Image 2]?", Images: []string{img, missing}}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -404,7 +404,7 @@ func TestBodyUserMessageWithImage(t *testing.T) {
 // translated body stacks every consecutive `tool` into one user message whose
 // only valid owner is the immediately preceding assistant.
 func TestCorpoFundeChamadasParalelas(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	msgs := []Mensagem{
 		{Role: "user", Conteudo: "look"},
 		{Role: "tool_call", ToolID: "a1", ToolName: "grep", ToolArgs: `{"q":"x"}`},
@@ -476,7 +476,7 @@ func TestCorpoFundeChamadasParalelas(t *testing.T) {
 // messages) must move next to its owner again — the Anthropic dialect pairs a
 // tool_result with the tool_use of the immediately preceding assistant.
 func TestCorpoReparaResultadoTardio(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	msgs := []Mensagem{
 		{Role: "user", Conteudo: "first"},
 		{Role: "tool_call", ToolID: "a1", ToolName: "shell", ToolArgs: `{}`},
@@ -527,7 +527,7 @@ func TestCorpoReparaResultadoTardio(t *testing.T) {
 // TestCorpoDescartaResultadoSemChamada: a result whose call appears nowhere
 // cannot be paired by any dialect (and the harness never writes one) — drop it.
 func TestCorpoDescartaResultadoSemChamada(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	msgs := []Mensagem{
 		{Role: "user", Conteudo: "hi"},
 		{Role: "assistant", Conteudo: "no calls here"},
@@ -546,7 +546,7 @@ func TestCorpoDescartaResultadoSemChamada(t *testing.T) {
 // TestCorpoPreservaSequenciaSimples: strictly alternating single calls already
 // satisfy the adjacency rule; the pass-through must not reorder them.
 func TestCorpoPreservaSequenciaSimples(t *testing.T) {
-	c := Novo(Config{BaseURL: "https://x/v1", Model: "m"})
+	c := chatClient(Config{BaseURL: "https://x/v1", Model: "m"})
 	msgs := []Mensagem{
 		{Role: "user", Conteudo: "go"},
 		{Role: "tool_call", ToolID: "a1", ToolName: "shell", ToolArgs: `{}`},

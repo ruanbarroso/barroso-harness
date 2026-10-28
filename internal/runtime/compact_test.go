@@ -346,7 +346,7 @@ func TestSendAppliesAgentCompaction(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000}
+	cfg := chatTestConfig(srv.URL, "fake", "k")
 	s := NewSession(cfg)
 	cwd := t.TempDir()
 	if err := s.Send(context.Background(), nil, cwd, "explore the parser"); err != nil {
@@ -444,7 +444,7 @@ func TestToolInjectedInTurnAppearsNextCycle(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewSession(config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000})
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
 	s.Injetar(tools.Spec{
 		Name: "connect_extra", Schema: map[string]any{"type": "object"},
 		Exec: func(context.Context, string, json.RawMessage) (string, error) {

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
@@ -119,7 +118,8 @@ func TestChangeReachesOpenSession(t *testing.T) {
 	log := &bodyLog{}
 	srv := httptest.NewServer(streamTurn(log))
 	defer srv.Close()
-	cfg := config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000, Effort: "none"}
+	cfg := chatTestConfig(srv.URL, "fake", "k")
+	cfg.Effort = "none"
 
 	s := NewSession(cfg)
 	// A tool that writes BARROSO.md while it runs: the classic mid-flight change.
@@ -168,7 +168,8 @@ func TestChangeAppliesToNewSession(t *testing.T) {
 	log := &bodyLog{}
 	srv := httptest.NewServer(streamTurn(log))
 	defer srv.Close()
-	cfg := config.Config{BaseURL: srv.URL, Model: "fake", APIKey: "k", Janela: 100_000, Effort: "none"}
+	cfg := chatTestConfig(srv.URL, "fake", "k")
+	cfg.Effort = "none"
 
 	if err := os.WriteFile(filepath.Join(cwd, "BARROSO.md"), []byte("be terse"), 0o644); err != nil {
 		t.Fatal(err)

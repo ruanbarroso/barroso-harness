@@ -240,6 +240,11 @@ func stripUntrusted(s string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(s, banner), "\n")
 }
 
+func (t *tuiTurn) ProtocoloAlternativo(from, to string) {
+	t.stopSpin()
+	fmt.Fprintf(t.out, "  %s %s\n", yellowf("⚠"), grayf(fmt.Sprintf("%s endpoint unavailable; using %s", from, to)))
+}
+
 func (t *tuiTurn) Pensou(_ string, dur time.Duration) {
 	t.stopSpin()
 	fmt.Fprintf(t.out, "  %s%s\n", orangef("+ Thought"), grayf(" · "+fmtDur(dur)))

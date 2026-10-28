@@ -229,6 +229,10 @@ type basicTUITurn struct {
 
 func (t basicTUITurn) Resposta(text string) { fmt.Fprintln(t.out, text) }
 
+func (t basicTUITurn) ProtocoloAlternativo(from, to string) {
+	fmt.Fprintf(t.out, "%s %s\n", yellowf(glyphWarn), dimf(fmt.Sprintf("%s endpoint unavailable; using %s", from, to)))
+}
+
 func (t basicTUITurn) Tool(name string, dur time.Duration, failed bool) {
 	state, colorize := "ok", greenf
 	if failed {
