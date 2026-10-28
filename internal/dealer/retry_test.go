@@ -195,6 +195,46 @@ func TestRetry500(t *testing.T) {
 	}
 }
 
+func TestNoEligibleUpstream503IsTerminal(t *testing.T) {
+	shrink(t)
+	for _, tc := range []struct {
+		name, body, code string
+	}{
+		{
+			name: "BK no_upstream_available code",
+			body: `{"error":{"type":"no_upstream_available","code":"no_upstream_available","message":"Nenhuma conta elegível está disponível no momento."}}`,
+			code: "no_upstream_available",
+		},
+		{
+			name: "parallel exhausted capacity code",
+			body: `{"error":{"type":"no_upstream_available","code":"no_eligible_capacity","message":"Nenhuma tentativa terminou com uma resposta completa."}}`,
+			code: "no_eligible_capacity",
+		},
+		{
+			name: "semantic error type when code omitted",
+			body: `{"error":{"type":"no_upstream_available","message":"Nenhuma conta elegível está disponível no momento."}}`,
+			code: "no_upstream_available",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, n := statusServer(t, 503, 9, nil, tc.body)
+			_, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
+			if err == nil || n.Load() != 1 || strings.Contains(err.Error(), "gave up") {
+				t.Fatalf("requests=%d err=%v; semantic exhaustion must not retry", n.Load(), err)
+			}
+			var he *httpError
+			if !errors.As(err, &he) || he.code != tc.code {
+				t.Fatalf("http error code=%q err=%v; want %q", func() string {
+					if he != nil {
+						return he.code
+					}
+					return ""
+				}(), err, tc.code)
+			}
+		})
+	}
+}
+
 func TestQuota429IsTerminal(t *testing.T) {
 	shrink(t)
 	srv, n := statusServer(t, 429, 9, nil, `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`)

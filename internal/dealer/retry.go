@@ -72,6 +72,7 @@ func (c *Cliente) ComAviso(f AvisoRetry) *Cliente {
 // (0 when absent or invalid).
 type httpError struct {
 	status     int
+	code       string
 	summary    string
 	retryAfter time.Duration
 	// shouldRetry is the provider's x-should-retry header: +1 true, -1 false,
@@ -243,6 +244,13 @@ func retryableStatus(code int) bool {
 
 // transient decides whether err is worth another attempt.
 func transient(err error) bool {
+	// The BK emits this structured 503 after it has already exhausted its
+	// virtual-model chain. Retrying the same request against the same gateway
+	// cannot make another account eligible and only burns minutes in backoff.
+	// This semantic terminal code wins over generic HTTP 503 retry handling.
+	if noEligibleUpstream(err) {
+		return false
+	}
 	// These answers describe a missing/unsupported route, not a transient
 	// provider failure. Let Responses fallback run immediately.
 	if responsesEndpointUnavailable(err) {
@@ -347,6 +355,7 @@ func responsesEndpointUnavailable(err error) bool {
 func newHTTPError(resp *http.Response, body []byte) *httpError {
 	e := &httpError{
 		status:     resp.StatusCode,
+		code:       upstreamErrorCode(body),
 		summary:    resumoComCodigo(body),
 		retryAfter: parseRetryAfterMs(resp.Header.Get("Retry-After-Ms")),
 	}
@@ -365,11 +374,11 @@ func newHTTPError(resp *http.Response, body []byte) *httpError {
 	return e
 }
 
-// resumoComCodigo is errorSummary plus the error code (or type) of an
-// OpenAI-style JSON body, e.g. "... (context_length_exceeded)": the code is
-// what tells overflow, quota and invalid requests apart.
-func resumoComCodigo(body []byte) string {
-	s := errorSummary(body, 300)
+// upstreamErrorCode extracts the structured code (or type) from an
+// OpenAI-compatible error body. Retry policy must use this rather than
+// infer semantics from an HTTP status alone: the BK uses HTTP 503 both for
+// transient provider failures and for an exhausted virtual-model chain.
+func upstreamErrorCode(body []byte) string {
 	var env struct {
 		Error struct {
 			Code json.RawMessage `json:"code"`
@@ -377,13 +386,43 @@ func resumoComCodigo(body []byte) string {
 		} `json:"error"`
 	}
 	if json.Unmarshal(body, &env) != nil {
-		return s
+		return ""
 	}
-	for _, tag := range []string{rawString(env.Error.Code), env.Error.Type} {
-		if tag != "" && !strings.Contains(s, tag) {
-			s += " (" + tag + ")"
-			break
+	if code := rawString(env.Error.Code); code != "" {
+		return code
+	}
+	return env.Error.Type
+}
+
+// noEligibleUpstream identifies gateway responses that mean its configured
+// account/model chain was already exhausted. It is terminal for this call;
+// the caller can decide when to try again instead of the BH replaying it four
+// times against the unchanged pool.
+func noEligibleUpstream(err error) bool {
+	var he *httpError
+	if errors.As(err, &he) {
+		switch strings.ToLower(he.code) {
+		case "no_upstream_available", "no_eligible_capacity":
+			return true
 		}
+	}
+	var pe *providerError
+	if errors.As(err, &pe) {
+		switch strings.ToLower(pe.kind) {
+		case "no_upstream_available", "no_eligible_capacity":
+			return true
+		}
+	}
+	return false
+}
+
+// resumoComCodigo is errorSummary plus the error code (or type) of an
+// OpenAI-style JSON body, e.g. "... (context_length_exceeded)": the code is
+// what tells overflow, quota and invalid requests apart.
+func resumoComCodigo(body []byte) string {
+	s := errorSummary(body, 300)
+	if tag := upstreamErrorCode(body); tag != "" && !strings.Contains(s, tag) {
+		s += " (" + tag + ")"
 	}
 	return s
 }
