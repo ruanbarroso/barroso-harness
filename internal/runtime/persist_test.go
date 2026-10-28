@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ruanbarroso/barroso-harness/internal/config"
@@ -766,6 +767,104 @@ func TestGuardrailForcesCompactionWhenPruneCannot(t *testing.T) {
 	}
 	if got := historyBytes(again.History()); got > 40_000 {
 		t.Fatalf("resume should re-apply the forced compaction, history has %d bytes", got)
+	}
+}
+
+// weightToolProvider answers the first `rounds` requests with one tool call
+// each (4 KiB unique arguments — the weight sits in the call args, which
+// prune cannot stub), then with clear text. It follows the failingAfterTool
+// provider shape.
+func weightToolProvider(t *testing.T, rounds int) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	n := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		i := n
+		n++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		emit := func(v any) {
+			b, _ := json.Marshal(v)
+			_, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+		}
+		if i < rounds {
+			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{"tool_calls": []map[string]any{{
+				"index": 0, "id": fmt.Sprintf("call_%d", i), "type": "function",
+				"function": map[string]any{"name": "weight", "arguments": `{"content":"round c` + fmt.Sprintf("%d", i) + ` of the fix: ` + strings.Repeat("a", 4000) + `"}`},
+			}}}}}})
+			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "tool_calls"}}})
+		} else {
+			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "back on track"}, "finish_reason": "stop"}}})
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+}
+
+func weightTool() tools.Spec {
+	return tools.Spec{Name: "weight", Schema: map[string]any{"type": "object"},
+		Exec: func(context.Context, string, json.RawMessage) (string, error) { return "heavy done", nil }}
+}
+
+// Regression (conversation 104129, session bh-20261028013103-4583, 2026-10-28):
+// a LONG TURN held its overflow inside itself — 229 tool rounds that happened
+// DURING the turn kept ~612 KiB after the request; the forced compaction
+// replaced only what comes before the request, prune had swept the results
+// already, and the freshly arrived results could not cover the deficit — the
+// turn died with "pruning did not free enough". The guardrail now drops the
+// turn's older rounds, whole units, keeping the newest.
+func TestGuardrailReducesLongTurnWhenPruneCannot(t *testing.T) {
+	srv := weightToolProvider(t, 60)
+	defer srv.Close()
+	st := testStore(t)
+	const id = "bh-20240101140000-0004"
+	cfg := fakeConfig(t, srv.URL)
+	cfg.Janela = 60_000
+
+	s := NewSessionWithStore(cfg, st, id)
+	s.Injetar(weightTool())
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "keep the caller check"); err != nil {
+		t.Fatalf("turn should survive through a turn reduction: %v", err)
+	}
+
+	// Events: the reduction was recorded as a compaction ("tipo corte").
+	events, err := st.ListEvents(id, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Kind == eventCompaction && strings.Contains(e.Payload, `"tipo":"corte"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("the turn reduction should be recorded as a compaction of tipo corte")
+	}
+
+	// Transcript: the request leads, one reduction note replaced the older
+	// rounds, the newest round and the final answer survived.
+	h := s.History()
+	if len(h) == 0 || h[0].Conteudo != "keep the caller check" {
+		t.Fatalf("the turn request must lead the history: %+v", h[:min(len(h), 3)])
+	}
+	for _, m := range h {
+		if strings.Contains(m.ToolArgs, `round c0 `) {
+			t.Fatalf("the OLDEST round must be gone: %+v", h[:3])
+		}
+	}
+	lastArgs := ""
+	for _, m := range h {
+		if m.Role == "tool_call" {
+			lastArgs = m.ToolArgs
+		}
+	}
+	if !strings.Contains(lastArgs, `round c59 `) {
+		t.Fatalf("the NEWEST round must stay, last args %.80q", lastArgs)
+	}
+	if h[len(h)-1].Conteudo != "back on track" {
+		t.Fatalf("the final answer must close the turn: %+v", h[len(h)-1])
 	}
 }
 

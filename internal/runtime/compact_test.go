@@ -96,6 +96,175 @@ func TestCompactHistorySkipsSyntheticUserMessages(t *testing.T) {
 	}
 }
 
+// A long turn whose older rounds hold the weight: reduceTurn drops whole
+// units OLDEST first until the freed bytes cover the deficit, and keeps the
+// newest unit with its riding notes intact.
+func TestReduceTurnDropsOldUnitsKeepsNewest(t *testing.T) {
+	u := func(id, result string) []dealer.Mensagem {
+		return []dealer.Mensagem{
+			{Role: "assistant", Conteudo: "checking " + id},
+			{Role: "tool_call", ToolID: id, ToolName: "grep", ToolArgs: `{"q":"x"}`},
+			{Role: "tool_result", ToolID: id, ToolName: "grep", Conteudo: result},
+		}
+	}
+	h := []dealer.Mensagem{
+		{Role: "user", Conteudo: summaryPrefix + "state so far"},
+		{Role: "user", Conteudo: "build the parser"},
+	}
+	h = append(h, u("u1", strings.Repeat("a", 1600))...)
+	h = append(h, u("u2", strings.Repeat("b", 1600))...)
+	h = append(h, u("u3", strings.Repeat("c", 1600))...)
+
+	got := reduceTurn(h, historyBytes(h[2:5]))
+	if got == nil {
+		t.Fatal("should drop at least one unit")
+	}
+	if !isSummary(got[0].Conteudo) || got[1].Conteudo != "build the parser" {
+		t.Fatalf("state and request must stay: %+v", got[:2])
+	}
+	if !strings.HasPrefix(got[2].Conteudo, turnDropNotePrefix) {
+		t.Fatalf("the note must replace the dropped units: %+v", got[2])
+	}
+	all := ""
+	for _, m := range got[3:] {
+		all += m.Conteudo
+	}
+	if strings.Contains(all, strings.Repeat("a", 1600)) || strings.Contains(all, "checking u1") {
+		t.Fatalf("the OLDEST unit must be gone: %+v", got[3:])
+	}
+	if !strings.Contains(all, strings.Repeat("c", 1600)) {
+		t.Fatalf("the NEWEST unit must stay: %+v", got[3:])
+	}
+}
+
+// Exactly the deficit: the oldest units go, the middle and newest stay.
+func TestReduceTurnStopsAtTheDeficit(t *testing.T) {
+	u := func(id string) []dealer.Mensagem {
+		return []dealer.Mensagem{
+			{Role: "tool_call", ToolID: id, ToolName: "grep", ToolArgs: `{"q":"x"}`},
+			{Role: "tool_result", ToolID: id, ToolName: "grep", Conteudo: strings.Repeat(id, 10)},
+		}
+	}
+	h := []dealer.Mensagem{{Role: "user", Conteudo: "request"}}
+	h = append(h, u("ua")...)
+	h = append(h, u("ub")...)
+	h = append(h, u("uc")...)
+	h = append(h, u("ud")...)
+
+	got := reduceTurn(h, historyBytes(h[1:5]))
+	if got == nil {
+		t.Fatal("should cover the deficit")
+	}
+	if last := got[len(got)-1]; last.ToolID != "ud" {
+		t.Fatalf("newest unit must survive: %+v", got[len(got)-3:])
+	}
+	all := ""
+	for _, m := range got {
+		all += m.Conteudo
+	}
+	if strings.Contains(all, strings.Repeat("ua", 10)) {
+		t.Fatal("ua should be dropped")
+	}
+	if !strings.Contains(all, strings.Repeat("uc", 10)) {
+		t.Fatalf("uc was covered but not needed — keep it: %+v", got)
+	}
+}
+
+// The note never stacks: a second reduction replaces it (it drops together
+// with the span it rides in), and compactHistory never takes it for the
+// user's request.
+func TestReduceTurnReplacesNoteAndCutsSkipIt(t *testing.T) {
+	u := func(id string) []dealer.Mensagem {
+		return []dealer.Mensagem{
+			{Role: "tool_call", ToolID: id, ToolName: "grep", ToolArgs: `{"q":"x"}`},
+			{Role: "tool_result", ToolID: id, ToolName: "grep", Conteudo: strings.Repeat(id, 100)},
+		}
+	}
+	h := []dealer.Mensagem{
+		{Role: "user", Conteudo: "old stuff"},
+		{Role: "user", Conteudo: "the request"},
+	}
+	h = append(h, u("ua")...)
+	h = append(h, u("ub")...)
+	first := reduceTurn(h, historyBytes(h[2:3]))
+	if first == nil {
+		t.Fatal("reduction expected")
+	}
+	// The next reduction frees the span the old note rides in (note + the
+	// rounds dropped since), so exactly one note remains.
+	again := reduceTurn(append(first, u("uc")...), historyBytes(first[3:5]))
+	if again == nil {
+		t.Fatal("second reduction expected")
+	}
+	notes := 0
+	for _, m := range again {
+		if strings.HasPrefix(m.Conteudo, turnDropNotePrefix) {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("the note must be replaced, not stacked (%d notes): %+v", notes, again)
+	}
+	// The fresh note and what follows it must not fool the compaction cut.
+	out := compactHistory(again, "fresh state")
+	if len(out) < 3 || !strings.Contains(out[0].Conteudo, "fresh state") || out[1].Conteudo != "the request" {
+		t.Fatalf("the cut should land on the real request: %+v", out)
+	}
+	for _, m := range out {
+		if strings.Contains(m.Conteudo, strings.Repeat("ua", 10)) || strings.Contains(m.Conteudo, strings.Repeat("ub", 10)) {
+			t.Fatalf("dropped rounds must not survive a later compaction: %+v", out)
+		}
+	}
+}
+
+// Not enough to free even dropping all but the newest unit: honest nil — and
+// the newest/singles unit never drops.
+func TestReduceTurnGivesUpWhenDeficitTooBig(t *testing.T) {
+	u := func(id string) []dealer.Mensagem {
+		return []dealer.Mensagem{
+			{Role: "tool_call", ToolID: id, ToolName: "grep", ToolArgs: `{"q":"x"}`},
+			{Role: "tool_result", ToolID: id, ToolName: "grep", Conteudo: strings.Repeat(id, 50)},
+		}
+	}
+	h := []dealer.Mensagem{{Role: "user", Conteudo: "request"}}
+	h = append(h, u("ua")...)
+	h = append(h, u("ub")...)
+	if got := reduceTurn(h, historyBytes(h)+1<<10); got != nil {
+		t.Fatalf("nil expected when nothing can free enough: %+v", got)
+	}
+	single := append([]dealer.Mensagem{{Role: "user", Conteudo: "req"}}, u("u")...)
+	if got := reduceTurn(single, 10); got != nil {
+		t.Fatalf("a single unit must never drop: %+v", got)
+	}
+}
+
+// Steer messages and image notes ride with the unit that follows them: a
+// kept unit keeps the instructions and images that arrived for it.
+func TestReduceTurnKeepsGapWithTheFollowingUnit(t *testing.T) {
+	u := func(id, result string) []dealer.Mensagem {
+		return []dealer.Mensagem{
+			{Role: "tool_call", ToolID: id, ToolName: "read", ToolArgs: `{"path":"x"}`},
+			{Role: "tool_result", ToolID: id, ToolName: "read", Conteudo: result},
+		}
+	}
+	h := []dealer.Mensagem{{Role: "user", Conteudo: "request"}}
+	h = append(h, u("u1", strings.Repeat("a", 900))...)
+	h = append(h, u("u2", tools.ImageAttached+"x.png\n")...)
+	h = append(h, dealer.Mensagem{Role: "user", Conteudo: readImagesNote, Images: []string{"x.png"}})
+	h = append(h, u("u3", strings.Repeat("c", 900))...)
+
+	got := reduceTurn(h, historyBytes(h[1:3]))
+	if got == nil {
+		t.Fatal("reduction expected")
+	}
+	for _, m := range got {
+		if m.Conteudo == readImagesNote {
+			return // the note rides with the kept, recent work
+		}
+	}
+	t.Fatalf("the image note must survive with the unit that follows it: %+v", got)
+}
+
 func TestCompactedStateIgnoresFailedCall(t *testing.T) {
 	calls := []dealer.ToolChamada{{ID: "1", Nome: compactToolName, Args: `{"state":"good"}`}}
 	if e := compactedState(calls, []dealer.Mensagem{{IsErro: true}}); e != "" {

@@ -130,10 +130,12 @@ const readImagesNote = "[images opened with read]"
 const loopNoticePrefix = "[loop] "
 
 // isSynthetic reports whether a user-role message was injected by the runtime
-// (image note, loop notice) rather than written by the user. Steer messages
-// are real user text and are not synthetic.
+// (image note, loop notice, turn-reduction note) rather than written by the
+// user. Steer messages are real user text and are not synthetic.
 func isSynthetic(content string) bool {
-	return content == readImagesNote || strings.HasPrefix(content, loopNoticePrefix)
+	return content == readImagesNote ||
+		strings.HasPrefix(content, loopNoticePrefix) ||
+		strings.HasPrefix(content, turnDropNotePrefix)
 }
 
 // compactHistory replaces everything before the CURRENT request (the last real
@@ -163,6 +165,14 @@ func compactHistory(h []dealer.Mensagem, state string) []dealer.Mensagem {
 
 // maxForcedState caps the mechanical state written by the guardrail.
 const maxForcedState = 24 << 10
+
+// turnDropNote prefixes the synthetic user message a turn reduction injects
+// in place of the dropped rounds. A LATER reduction replaces the old note
+// instead of stacking, and isSynthetic must recognize it so compaction cuts
+// never take it for the user's request.
+const turnDropNotePrefix = "[earlier tool rounds of this turn are dropped"
+
+const turnDropNote = turnDropNotePrefix + " by the guardrail to keep the request in the context window; the working state above summarizes them, and session_search can recover any detail]\n\n"
 
 // forcedState builds the state of a guardrail-forced compaction, used when
 // pruning tool results cannot make the request fit: the latest summary (if
@@ -235,6 +245,115 @@ func historyBytes(h []dealer.Mensagem) int {
 		}
 	}
 	return n
+}
+
+// reduceTurn replaces the turn's OLDER tool rounds with a mechanical note,
+// dropping whole units oldest first until the freed bytes cover wantBytes (or
+// only the newest unit remains). It is the guardrail's last mechanical lever:
+// prune stubs results, forced compaction replaces the history before the
+// request, but a LONG TURN can still hold the overflow inside its own rounds
+// (conversation 104129, session bh-20261028013103-4583, 2026-10-28: 229 tool
+// rounds kept ~612 KiB alive after the prompt; the forced compaction cut
+// before the prompt and freed nothing, and prune had the tail results only).
+//
+// A unit is whole (assistant text + its tool calls + all their results), so
+// the request stays valid for the provider and for a stateless Responses
+// replay. The weight is counted the way historyBytes does. A previous
+// reduction note is replaced, never stacked. Returns nil when there is
+// nothing to drop (no units beyond the newest, or no real user request to
+// anchor the turn).
+func reduceTurn(h []dealer.Mensagem, wantBytes int) []dealer.Mensagem {
+	if wantBytes <= 0 {
+		return nil
+	}
+	cut := -1 // the turn's own request: the last real user message
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role == "user" && !isSummary(h[i].Conteudo) && !isSynthetic(h[i].Conteudo) {
+			cut = i
+			break
+		}
+	}
+	units := turnUnits(h, cut+1)
+	if len(units) <= 1 {
+		return nil
+	}
+	freed := 0
+	drop := 0
+	for drop = 0; drop < len(units)-1; drop++ {
+		freed += historyBytes(h[units[drop].start:units[drop].end])
+		if freed >= wantBytes {
+			drop++
+			break
+		}
+	}
+	if drop == 0 || freed < wantBytes {
+		return nil
+	}
+	out := make([]dealer.Mensagem, 0, len(h)-(units[drop-1].end-units[0].start)+1)
+	for _, m := range h[:units[0].start] {
+		if strings.HasPrefix(m.Conteudo, turnDropNotePrefix) {
+			continue // the fresh note below replaces an older one
+		}
+		out = append(out, m)
+	}
+	out = append(out, dealer.Mensagem{Role: "user", Conteudo: turnDropNote})
+	return append(out, h[units[drop].start:]...)
+}
+
+// turnUnit is the span [start, end) of ONE tool round unit in the history:
+// an assistant text and/or a batch of tool calls together with all their
+// results. The span OPENS at the gap of user messages that precedes the
+// unit's first message (steers, notes, updates): runtime-injected notes ride
+// with the unit that follows them, so keeping a unit keeps instructions the
+// user sent for it, and dropping one drops its own stale notices.
+type turnUnit struct {
+	start, end int
+}
+
+// turnUnits segments the history after `from` into whole tool-round units.
+// It relies on the runtime being the only writer: a tool round is appended as
+// [assistant text (optional), tool_call×N, tool_result×N] back to back, so a
+// unit's END is its call/result pairing, never the next user message.
+// Call-less results cannot exist: the runtime commits a batch and its
+// results together (and Resume repairs orphan calls before the transcript
+// is used).
+func turnUnits(h []dealer.Mensagem, from int) []turnUnit {
+	var units []turnUnit
+	i := from
+	for i < len(h) {
+		start := i // the span opens at the pending gap of user messages
+		for i < len(h) && h[i].Role == "user" {
+			i++
+		}
+		if i >= len(h) {
+			break
+		}
+		if h[i].Role == "assistant" {
+			i++ // the round's intermediate text heads its batch
+		}
+		var calls int
+		for i < len(h) && h[i].Role == "tool_call" {
+			calls++
+			i++
+		}
+		if calls > 0 {
+			var results int
+			for i < len(h) && h[i].Role == "tool_result" && results < calls {
+				results++
+				i++
+			}
+			// Repairs of Resume (closeOrphanToolCalls) may append extra
+			// results for interrupted calls right after the pairing block;
+			// they belong to this unit, so no call is ever half-dropped.
+			for i < len(h) && h[i].Role == "tool_result" {
+				i++
+			}
+		}
+		if i > start {
+			units = append(units, turnUnit{start: start, end: i})
+		}
+	}
+	return units
 }
 
 // compactedState returns the state of the round's last SUCCESSFUL

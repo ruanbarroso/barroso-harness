@@ -449,6 +449,33 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				}
 			}
 			if pruned == nil {
+				// A long turn can also hold the overflow INSIDE itself:
+				// prune swept the results once, the forced compaction
+				// replaced only what came before the request, and the
+				// rounds since the prompt still outweigh the window
+				// (conversation 104129, session bh-20261028013103-4583,
+				// 2026-10-28: 229 tool rounds after the prompt, ~612 KiB;
+				// the forced state freed nothing and the tail's fresh
+				// results could not cover a 5,092-token deficit). Last
+				// mechanical lever before dying: drop the turn's older
+				// rounds, whole units, keeping the newest.
+				if reduced := reduceTurn(working, s.est.Bytes(ev.TokensEntrada+ev.TokensSaida-s.config.Janela)); reduced != nil {
+					before := historyBytes(working)
+					working = reduced
+					floor = 0
+					compacted = true
+					r.Guardrail(true)
+					// No estado: this cut is in-memory only; Resume rehydrates
+					// the full transcript and the guardrail re-fits it.
+					s.record(eventCompaction, map[string]any{
+						"politica":     policy(s.config.PoliticaContexto),
+						"tipo":         "corte",
+						"ciclo":        cycle,
+						"bytes_antes":  before,
+						"bytes_depois": historyBytes(working),
+					})
+					continue
+				}
 				return fmt.Errorf("guardrail: request does not fit (%s) and pruning did not free enough", ev.Veredito())
 			}
 			r.Guardrail(true)
