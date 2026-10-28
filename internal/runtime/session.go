@@ -552,6 +552,20 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 			continue
 		}
 		extraLimit = 0
+		if len(round.Tools) > 0 && len(list) > 0 && looksLikeToolText(round.Texto) {
+			// Some gateways return a malformed tool-call envelope in content
+			// alongside valid structured calls. It must not be shown as an
+			// intermediate assistant message, but the actual tool calls remain
+			// authoritative and still execute below.
+			s.record("tool_texto", map[string]any{
+				"cycle":     cycle,
+				"fim":       round.Fim,
+				"bytes":     len(round.Texto),
+				"com_tools": true,
+				"tentativa": toolTextRetries,
+			})
+			round.Texto = ""
+		}
 		if len(round.Tools) == 0 {
 			if strings.TrimSpace(round.Texto) == "" {
 				// An empty final round is never an answer: the provider

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -24,10 +25,43 @@ var (
 // leaked into the content.
 func looksLikeToolText(text string) bool {
 	t := strings.TrimSpace(text)
-	if t == "" || !toolTextEnd.MatchString(t) {
+	if t == "" {
+		return false
+	}
+	if looksLikeToolUsesEnvelope(t) {
+		return true
+	}
+	if !toolTextEnd.MatchString(t) {
 		return false
 	}
 	return toolTextMarker.MatchString(t)
+}
+
+// looksLikeToolUsesEnvelope recognizes the JSON transport envelope emitted as
+// assistant content in conversation 104084 (2026-10-27): the model returned a
+// top-level `tool_uses` array with recipient_name/parameters, followed by a
+// provider diagnostic suffix. Decode only the first JSON value because that
+// suffix is not part of the envelope and may make the whole content invalid JSON.
+func looksLikeToolUsesEnvelope(text string) bool {
+	var envelope struct {
+		ToolUses []struct {
+			RecipientName string          `json:"recipient_name"`
+			Parameters    json.RawMessage `json:"parameters"`
+		} `json:"tool_uses"`
+	}
+	if err := json.NewDecoder(strings.NewReader(text)).Decode(&envelope); err != nil || len(envelope.ToolUses) == 0 {
+		return false
+	}
+	for _, call := range envelope.ToolUses {
+		if strings.TrimSpace(call.RecipientName) == "" || len(call.Parameters) == 0 {
+			return false
+		}
+		var params map[string]json.RawMessage
+		if err := json.Unmarshal(call.Parameters, &params); err != nil || params == nil {
+			return false
+		}
+	}
+	return true
 }
 
 const (
