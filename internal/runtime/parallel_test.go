@@ -147,6 +147,10 @@ func TestSystemPromptFacts(t *testing.T) {
 	for _, want := range []string{
 		runtime.GOOS + "/" + runtime.GOARCH,
 		"ISSUE THEM ALL IN THE SAME RESPONSE",
+		"## Progress updates",
+		"Before a lengthy phase of tool work, give one concise, concrete sentence",
+		"Do not give a full upfront plan",
+		"continue the work immediately",
 		`C:\work`,
 		"2026-10-19",
 		"subagent",

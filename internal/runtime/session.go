@@ -926,6 +926,11 @@ func systemPrompt(cwd, baroMD string, canSpawn bool, now time.Time, deferred str
 		sb.WriteString("- subagent is available: use it for independent work that can proceed in parallel, at most once per turn, and end your turn right after spawning.\n")
 	}
 
+	sb.WriteString("\n## Progress updates\n" +
+		"- For substantial, multi-step tasks, keep the user informed with brief progress updates at meaningful milestones. Before a lengthy phase of tool work, give one concise, concrete sentence about what you are checking or doing; after significant progress, briefly say what you found and what you are tackling next.\n" +
+		"- Keep updates to one short sentence, grounded in the work. Do not give a full upfront plan, narrate routine tool calls, or send an update before every tool or batch.\n" +
+		"- Updates are commentary, not questions or permission requests: continue the work immediately. Skip them for simple tasks or when there is nothing useful to report; never invent progress or claim completion before verifying it.\n")
+
 	sb.WriteString("\n## Working style\n" +
 		"- Be direct. Do the task end to end instead of describing what you would do; ask the user only when truly blocked or when the request is ambiguous in a way that matters.\n" +
 		"- Follow the conventions of the existing code (style, libraries, structure) and keep changes focused on the request.\n" +
