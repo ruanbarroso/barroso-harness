@@ -651,6 +651,7 @@ func (a *Agente) Esperar() { a.running.Wait() }
 //
 //	Resposta     → agent_message_chunk (the model's text; runtime delivers it whole)
 //	Nota         → agent_message_chunk (text of a round that also calls tools)
+//	Pensou       → agent_thought_chunk (provider-exposed reasoning; the client persists it with Thinking)
 //	ToolComecou  → tool_call in_progress, kind "other", arguments as rawInput
 //	ToolTerminou → tool_call_update with the final status and an output excerpt
 //	Tool / Eco   → fallback when the runtime does not use the live path
@@ -698,6 +699,16 @@ func (r *acpRenderer) Tool(name string, dur time.Duration, failed bool) {
 // goes out as agent_message_chunk: a client that sees a tool_call after text
 // knows that text was an intermediate message, not the answer.
 func (r *acpRenderer) Nota(text string) { r.Resposta(text) }
+
+// Pensou carries provider-exposed reasoning through ACP. The Agents connector
+// appends agent_thought_chunk to the active Thinking row and persists its detail
+// when that row closes, so it remains clickable after the turn. This is distinct
+// from Pensando's empty keepalive/session-state update.
+func (r *acpRenderer) Pensou(text string, _ time.Duration) {
+	r.emit("agent_thought_chunk", map[string]any{
+		"content": map[string]any{"type": "text", "text": text},
+	})
+}
 
 // ToolComecou announces the call BEFORE it runs, with its arguments as
 // rawInput, so the client can show "grep: pattern in file" instead of "grep".

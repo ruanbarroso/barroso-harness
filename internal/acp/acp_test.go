@@ -156,6 +156,7 @@ type fakeTurn struct {
 	delay   time.Duration // delay before responding (cancellation)
 	compact bool          // emits Guardrail(true)
 	tokens  bool          // emits Tokens (must not produce a notification)
+	thought string        // provider-exposed reasoning, emitted through RendererRaciocinio
 	nota    string        // intermediate text, emitted through RendererNota
 	args    string        // when set, tools go through RendererAoVivo with these args
 
@@ -183,6 +184,9 @@ func (f *fakeTurn) Send(ctx context.Context, r runtime.Renderer, cwd, prompt str
 		case <-ctx.Done():
 			f.mark()
 		}
+	}
+	if rr, ok := r.(runtime.RendererRaciocinio); ok && f.thought != "" {
+		rr.Pensou(f.thought, 1500*time.Millisecond)
 	}
 	if rn, ok := r.(runtime.RendererNota); ok && f.nota != "" {
 		rn.Nota(f.nota)
@@ -1083,6 +1087,43 @@ func TestPromptTranslatesToolAndEchoToNotifications(t *testing.T) {
 	}
 	if n := len(ended.Params.Update.Content.Blocks); n != 1 || ended.Params.Update.Content.Blocks[0].Text != "tool output" {
 		t.Fatalf("unexpected tool output: %+v", ended.Params.Update.Content)
+	}
+}
+
+func TestRenderReasoningIsPersistableThoughtBeforeIntermediateTextAndTools(t *testing.T) {
+	f := &fakeTurn{
+		started: make(chan struct{}),
+		thought: "**Plan**\n\nInspect the file before editing.",
+		nota:    "I will inspect the file now.",
+		tools:   []string{"read"},
+		args:    `{"filePath":"main.go"}`,
+		text:    "Done.",
+	}
+	h := setup(t, f)
+	h.send(t, MetSessionNovo, 2, map[string]any{"cwd": "."})
+	ls := waitLines(t, h.out, 1)
+	id := ls[0].Result["sessionId"]
+	h.send(t, MetPrompt, 3, map[string]any{
+		"sessionId": id,
+		"prompt":    []map[string]string{{"type": "text", "text": "inspect and edit"}},
+	})
+	ls = waitLines(t, h.out, 7)
+
+	wantKinds := []string{"agent_thought_chunk", "agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"}
+	for i, want := range wantKinds {
+		got := ls[i+1].Params.Update.SessionUpdate
+		if got != want {
+			t.Fatalf("notification %d kind = %q, want %q; output:\n%s", i, got, want, h.out.String())
+		}
+	}
+	if got := ls[1].Params.Update.Content.Blocks[0].Text; got != f.thought {
+		t.Fatalf("thought text = %q, want %q", got, f.thought)
+	}
+	if got := ls[2].Params.Update.Content.Blocks[0].Text; got != f.nota {
+		t.Fatalf("intermediate message = %q, want %q", got, f.nota)
+	}
+	if ls[6].Error != nil || string(ls[6].ID) != "3" {
+		t.Fatalf("prompt response after thought/tool/answer = %+v", ls[6])
 	}
 }
 
