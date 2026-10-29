@@ -379,7 +379,8 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	regens := 0
 	// Rounds re-asked because the call came written as text (see tooltext.go).
 	toolTextRetries := 0
-	reactiveDone := false
+	reactivePruned := false
+	reactiveCompacted := false
 	compacted := false
 	forcedCompaction := false
 	// Whole-turn totals: each tool cycle spends request and response, and the
@@ -532,18 +533,39 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		}
 		round, err := cli.RodarContext(ctx, system, working, schemas)
 		if err != nil {
-			if contextOverflow(err) && s.config.Janela > 0 && !reactiveDone {
-				reactiveDone = true
+			if contextOverflow(err) && !reactiveCompacted {
 				r.Guardrail(false)
-				s.record("guardrail", map[string]any{
-					"tipo":     "reativa",
-					"politica": policy(s.config.PoliticaContexto),
-					"motivo":   oneLine(err.Error()),
-				})
-				pruned := prune(working, &floor, s.est.Bytes(budget.ReservaOperacional))
-				if pruned != nil {
+				if !reactivePruned {
+					reactivePruned = true
+					s.record("guardrail", map[string]any{
+						"tipo":     "reativa",
+						"politica": policy(s.config.PoliticaContexto),
+						"motivo":   oneLine(err.Error()),
+					})
+					if pruned := prune(working, &floor, s.est.Bytes(budget.ReservaOperacional)); pruned != nil {
+						compacted = true
+						working = pruned
+						continue
+					}
+				}
+				// A provider's structured 400 is authoritative: if stubbing tool outputs
+				// was not enough (or there was nothing to stub), persist a mechanical
+				// summary of the old transcript and retry with the current request intact.
+				if state := forcedState(working); state != "" {
+					reactiveCompacted = true
+					before := historyBytes(working)
+					working = compactHistory(working, state)
+					floor = 0
 					compacted = true
-					working = pruned
+					s.record(eventCompaction, map[string]any{
+						"politica":     policy(s.config.PoliticaContexto),
+						"tipo":         "reativa",
+						"ciclo":        cycle,
+						"bytes_antes":  before,
+						"bytes_depois": historyBytes(working),
+						"estado_bytes": len(state),
+						"estado":       state,
+					})
 					continue
 				}
 			}

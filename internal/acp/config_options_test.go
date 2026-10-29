@@ -67,6 +67,23 @@ func TestSessionNewAdvertisesModelAndEffort(t *testing.T) {
 	if ls[0].Result["models"] == nil {
 		t.Fatal("faltou o formato models (currentModelId/availableModels)")
 	}
+	cfg := turn.Config()
+	if cfg.Janela != 100000 || cfg.JanelaSource != config.FonteCatalogo {
+		t.Fatalf("session/new should sync the selected model's catalog window: %d/%q", cfg.Janela, cfg.JanelaSource)
+	}
+}
+
+func TestSessionNewPreservesManualContextWindow(t *testing.T) {
+	turn := &cfgTurn{cfg: config.Config{
+		Model: "a-model", BaseURL: "https://x/v1", Janela: 32000, JanelaSource: config.FonteManual,
+	}}
+	h := setupCfg(t, turn)
+	h.send(t, MetSessionNovo, 1, map[string]any{"cwd": t.TempDir()})
+	waitLines(t, h.out, 1)
+	cfg := turn.Config()
+	if cfg.Janela != 32000 || cfg.JanelaSource != config.FonteManual {
+		t.Fatalf("catalog must not overwrite a manual window: %d/%q", cfg.Janela, cfg.JanelaSource)
+	}
 }
 
 func TestSetConfigOptionChangesSession(t *testing.T) {

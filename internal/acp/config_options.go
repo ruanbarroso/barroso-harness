@@ -78,7 +78,10 @@ func (a *Agente) models(cfg config.Config) []dealer.CatalogModel {
 	ls, err := fetch(ctx, base, key)
 	if err != nil {
 		a.logf("acp: model catalog unavailable: %v", err)
-		return c.models // stale is better than nothing
+		if c.key == ck {
+			return c.models // stale is better than nothing for this provider
+		}
+		return nil
 	}
 	c.key, c.at, c.models = ck, time.Now(), ls
 	return ls
@@ -137,8 +140,35 @@ func (a *Agente) modelsState(cfg config.Config) map[string]any {
 	return map[string]any{"currentModelId": cfg.Model, "availableModels": avail}
 }
 
+// syncCatalogWindow fills a missing (or stale catalog-derived) context window from
+// the active provider's /models response. Explicit/manual windows are never overwritten.
+func (a *Agente) syncCatalogWindow(s *session) {
+	cfg, c := a.sessionConfig(s)
+	if c == nil || (cfg.Janela > 0 && cfg.JanelaSource != config.FonteCatalogo) {
+		return
+	}
+	window := 0
+	for _, model := range a.models(cfg) {
+		if model.ID == cfg.Model {
+			window = model.ContextLength
+			break
+		}
+	}
+	if cfg.Janela == window && (window == 0 || cfg.JanelaSource == config.FonteCatalogo) {
+		return
+	}
+	cfg.Janela = window
+	cfg.JanelaSource = ""
+	if window > 0 {
+		cfg.JanelaSource = config.FonteCatalogo
+	}
+	c.Configure(cfg)
+	a.logf("acp: session %s: context window = %d (catalog)", s.id, window)
+}
+
 // sessionState is what session/new and session/load add to their result.
 func (a *Agente) sessionState(s *session) map[string]any {
+	a.syncCatalogWindow(s)
 	cfg, _ := a.sessionConfig(s)
 	return map[string]any{
 		"configOptions": a.configOptions(cfg),

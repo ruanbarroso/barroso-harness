@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ruanbarroso/barroso-harness/internal/config"
@@ -737,6 +738,88 @@ func TestLogToolsReadAnotherSession(t *testing.T) {
 // arguments and results under 2 KiB — nothing prune can stub. The turn died
 // with "pruning did not free enough". The guardrail now forces a mechanical
 // compaction, persisted so the next Resume starts small too.
+func TestReactiveContextOverflowCompactsAndRetriesWithoutCatalogWindow(t *testing.T) {
+	st := testStore(t)
+	const id = "bh-20240101140000-react"
+	var calls atomic.Int32
+	var retryMessages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"This model's maximum context length is 1000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}`))
+			return
+		}
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode retry body: %v", err)
+		}
+		retryMessages = body.Messages
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := fakeConfig(t, srv.URL)
+	cfg.Janela = 0 // the structured provider 400 must still trigger recovery
+	seed := NewSessionWithStore(cfg, st, id)
+	seed.record("user_message", map[string]any{"role": "user", "content": "old request to preserve"})
+	seed.record("assistant", map[string]any{"role": "assistant", "content": "old assistant state"})
+
+	s := NewSessionWithStore(cfg, st, id)
+	if err := s.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "current request"); err != nil {
+		t.Fatalf("structured context 400 should compact and retry: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("provider calls = %d; want initial 400 plus one retry", got)
+	}
+	if len(retryMessages) < 3 || !isSummary(retryMessages[1].Content) {
+		t.Fatalf("retry must use compacted prior history: %+v", retryMessages)
+	}
+	if retryMessages[len(retryMessages)-1].Content != "current request" {
+		t.Fatalf("retry must keep the caller's request intact: %+v", retryMessages)
+	}
+
+	found := false
+	for _, e := range mustEvents(t, st, id) {
+		if e.Kind == eventCompaction && strings.Contains(e.Payload, `"tipo":"reativa"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("reactive compaction must be persisted for session/load and resume")
+	}
+	again := NewSessionWithStore(cfg, st, id)
+	if err := again.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if len(again.History()) < 3 || !isSummary(again.History()[0].Conteudo) || again.History()[len(again.History())-2].Conteudo != "current request" {
+		t.Fatalf("resume did not apply compaction and keep request: %+v", again.History())
+	}
+}
+
+func mustEvents(t *testing.T, st *store.Store, id string) []store.Event {
+	t.Helper()
+	events, err := st.ListEvents(id, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
 func TestGuardrailForcesCompactionWhenPruneCannot(t *testing.T) {
 	srv := textProvider(t, "back on track")
 	defer srv.Close()
