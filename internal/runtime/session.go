@@ -872,12 +872,11 @@ var sequentialTools = map[string]bool{
 }
 
 // runRound executes the round's tool calls and returns their outcomes in the
-// ORIGINAL order. Independent calls run concurrently; the renderer and the log
-// (recordResult) are only touched from this goroutine, in call order: every
-// ToolInicio is announced up front, and each call's recordResult/Tool/Eco is
-// emitted as soon as it and all earlier calls are done. Cancellation reaches
-// the tools through ctx; waiting for every goroutine keeps the transcript free
-// of calls without results.
+// ORIGINAL order. Independent calls run concurrently. Live renderer callbacks
+// announce each call as it finishes (and may therefore overlap/out-of-order);
+// recordResult and the fallback Tool/Eco path remain serialized in call order.
+// Cancellation reaches the tools through ctx; waiting for every goroutine keeps
+// the transcript free of calls without results.
 func (s *Session) runRound(ctx context.Context, r Renderer, list []tools.Spec, cwd string, calls []dealer.ToolChamada) []toolOutcome {
 	outcomes := make([]toolOutcome, len(calls))
 	av, live := r.(RendererAoVivo)
@@ -897,14 +896,16 @@ func (s *Session) runRound(ctx context.Context, r Renderer, list []tools.Spec, c
 			o.output = "error: " + execErr.Error()
 		}
 		outcomes[i] = o
+		if live {
+			name, args := shownCall(o.call.Nome, o.call.Args)
+			av.ToolTerminou(liveID(i), name, args, o.output, o.dur, o.isErr)
+		}
 	}
 	report := func(i int) {
 		o := outcomes[i]
 		// Outputs above blobThreshold become blob + preview.
 		s.recordResult(o.call.ID, o.call.Nome, o.output, o.isErr)
 		if live {
-			name, args := shownCall(o.call.Nome, o.call.Args)
-			av.ToolTerminou(liveID(i), name, args, o.output, o.dur, o.isErr)
 			return
 		}
 		if rr, ok := r.(RendererResultado); ok {

@@ -87,9 +87,10 @@ type RendererResultado interface {
 
 // RendererAoVivo is OPTIONAL and takes precedence over ToolInicio and
 // ToolResultado: each call is announced when it starts, its live output
-// (shell) arrives while it runs, and the result closes the same call.
-// id tells concurrent calls of a round apart. ToolSaida may be called from
-// the tool's own goroutine.
+// (shell) arrives while it runs, and the result closes the same call. Calls in
+// a parallel round can finish in any order, so ToolSaida and ToolTerminou may
+// overlap and are invoked from the tool's goroutine. Implementations must be
+// concurrency-safe. id tells concurrent calls of a round apart.
 type RendererAoVivo interface {
 	ToolComecou(id, name, args string)
 	ToolSaida(id, chunk string)

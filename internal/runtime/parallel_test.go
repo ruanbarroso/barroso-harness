@@ -126,6 +126,74 @@ func TestParallelToolCallsRunConcurrentlyInOrder(t *testing.T) {
 	}
 }
 
+type liveCompletionRenderer struct {
+	recRenderer
+	completed chan string
+}
+
+func (r *liveCompletionRenderer) ToolComecou(string, string, string) {}
+func (r *liveCompletionRenderer) ToolSaida(string, string)           {}
+func (r *liveCompletionRenderer) ToolTerminou(_, name, _, _ string, _ time.Duration, _ bool) {
+	r.completed <- name
+}
+
+func TestParallelLiveToolsCompleteAsTheyFinish(t *testing.T) {
+	srv := twoCallProvider("slow_a", "fast_b")
+	defer srv.Close()
+	s := NewSession(chatTestConfig(srv.URL, "fake", "k"))
+	releaseSlow := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSlow) }) }
+	defer release()
+	s.Injetar(
+		tools.Spec{Name: "slow_a", Schema: map[string]any{"type": "object"}, Exec: func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
+			select {
+			case <-releaseSlow:
+				return "out-slow_a", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}},
+		tools.Spec{Name: "fast_b", Schema: map[string]any{"type": "object"}, Exec: func(context.Context, string, json.RawMessage) (string, error) {
+			return "out-fast_b", nil
+		}},
+	)
+	rr := &liveCompletionRenderer{completed: make(chan string, 2)}
+	finished := make(chan error, 1)
+	go func() { finished <- s.Send(context.Background(), rr, t.TempDir(), "go") }()
+
+	select {
+	case name := <-rr.completed:
+		if name != "fast_b" {
+			t.Fatalf("first live completion = %q, want fast_b", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast tool did not report completion while the earlier call was still blocked")
+	}
+	release()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not finish after releasing the slow tool")
+	}
+	if name := <-rr.completed; name != "slow_a" {
+		t.Fatalf("second live completion = %q, want slow_a", name)
+	}
+
+	var results []string
+	for _, m := range s.History() {
+		if m.Role == "tool_result" {
+			results = append(results, m.ToolName+":"+m.Conteudo)
+		}
+	}
+	if got, want := strings.Join(results, ","), "slow_a:out-slow_a,fast_b:out-fast_b"; got != want {
+		t.Fatalf("tool results should remain in call order: got %q, want %q", got, want)
+	}
+}
+
 func TestMutatingToolForcesSequentialRound(t *testing.T) {
 	srv := twoCallProvider("slow_a", "context_write")
 	defer srv.Close()
