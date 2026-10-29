@@ -54,6 +54,7 @@ type line struct {
 			Status        string          `json:"status"`
 			RawInput      json.RawMessage `json:"rawInput"`
 			Content       Content         `json:"content"`
+			Meta          json.RawMessage `json:"_meta"`
 		} `json:"update"`
 	} `json:"params"`
 	Result map[string]any `json:"result"`

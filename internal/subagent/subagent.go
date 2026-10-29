@@ -140,14 +140,26 @@ type collector struct {
 	t *Tarefa
 }
 
+// activity stores one child event and calls the host outside the manager lock.
+// The callback may write to the ACP stream and must not run while g.mu is held.
+func (c *collector) activity(event Evento, result bool) {
+	c.g.mu.Lock()
+	if result {
+		c.t.appendResult(event.Texto)
+	}
+	c.t.appendConversa(event)
+	fn, taskID := c.g.onActivity, c.t.ID
+	c.g.mu.Unlock()
+	if fn != nil {
+		fn(taskID, event)
+	}
+}
+
 func (c *collector) Resposta(text string) {
 	if text == "" {
 		return
 	}
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendResult(text)
-	c.t.appendConversa(Evento{Tipo: EventoResposta, Texto: text})
+	c.activity(Evento{Tipo: EventoResposta, Texto: text}, true)
 }
 
 func (c *collector) Tool(name string, _ time.Duration, isErr bool) {
@@ -168,22 +180,16 @@ func (c *collector) Pensou(text string, dur time.Duration) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendConversa(Evento{Tipo: EventoPensamento, Texto: text, Duracao: dur})
+	c.activity(Evento{Tipo: EventoPensamento, Texto: text, Duracao: dur}, false)
 }
 func (c *collector) Nota(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendConversa(Evento{Tipo: EventoNota, Texto: text})
+	c.activity(Evento{Tipo: EventoNota, Texto: text}, false)
 }
 func (c *collector) ToolComecou(id, name, args string) {
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendConversa(Evento{ID: id, Tipo: EventoToolCall, Nome: name, Args: args, Executando: true})
+	c.activity(Evento{ID: id, Tipo: EventoToolCall, Nome: name, Args: args, Executando: true}, false)
 }
 func (c *collector) ToolSaida(id, chunk string) {
 	if chunk == "" {
@@ -200,19 +206,25 @@ func (c *collector) ToolSaida(id, chunk string) {
 }
 func (c *collector) ToolTerminou(id, name, args, output string, dur time.Duration, failed bool) {
 	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
 	line := "[tool " + name + "]"
 	if failed {
 		line = "[tool " + name + " error]"
 	}
 	c.t.appendTranscript(line)
+	event := Evento{ID: id, Tipo: EventoToolCall, Nome: name, Args: args, Texto: limitConversationText(output), Duracao: dur, Erro: failed}
 	for i := len(c.t.conversa) - 1; i >= 0; i-- {
 		e := &c.t.conversa[i]
 		if e.ID == id && e.Tipo == EventoToolCall {
 			e.Nome, e.Args, e.Texto = name, args, limitConversationText(output)
 			e.Duracao, e.Erro, e.Executando = dur, failed, false
-			return
+			event = *e
+			break
 		}
+	}
+	fn, taskID := c.g.onActivity, c.t.ID
+	c.g.mu.Unlock()
+	if fn != nil && event.ID != "" {
+		fn(taskID, event)
 	}
 }
 func (c *collector) Guardrail(proactive bool) {
@@ -220,9 +232,7 @@ func (c *collector) Guardrail(proactive bool) {
 	if proactive {
 		text = "Context compacted proactively"
 	}
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendConversa(Evento{Tipo: EventoSistema, Texto: text})
+	c.activity(Evento{Tipo: EventoSistema, Texto: text}, false)
 }
 func (c *collector) Cortada(limit int, gaveUp bool) {
 	text := fmt.Sprintf("Response cut at the output limit (%d tokens)", limit)
@@ -231,9 +241,7 @@ func (c *collector) Cortada(limit int, gaveUp bool) {
 	} else {
 		text += "; continuing"
 	}
-	c.g.mu.Lock()
-	defer c.g.mu.Unlock()
-	c.t.appendConversa(Evento{Tipo: EventoSistema, Texto: text})
+	c.activity(Evento{Tipo: EventoSistema, Texto: text}, false)
 }
 
 func (c *collector) Eco(string)                           {}
@@ -256,8 +264,9 @@ type Gerente struct {
 
 	// onFinish is called (outside the lock) whenever a task completes, fails
 	// or is cancelled: that is how the parent learns without polling status.
-	onFinish  func()
-	delivered map[string]bool // tasks already delivered by Terminadas
+	onFinish   func()
+	onActivity func(taskID string, event Evento)
+	delivered  map[string]bool // tasks already delivered by Terminadas
 
 	// spawnTurn is the ctx of the turn that already launched sub-agents: a
 	// turn launches only once (see spawnSpec).
@@ -299,6 +308,14 @@ func Novo(cfg Config) *Gerente {
 func (g *Gerente) AoTerminar(fn func()) {
 	g.mu.Lock()
 	g.onFinish = fn
+	g.mu.Unlock()
+}
+
+// AoAtividade registers a host for each visible child event. Callbacks run
+// outside the manager lock so the host can safely write to a protocol stream.
+func (g *Gerente) AoAtividade(fn func(taskID string, event Evento)) {
+	g.mu.Lock()
+	g.onActivity = fn
 	g.mu.Unlock()
 }
 

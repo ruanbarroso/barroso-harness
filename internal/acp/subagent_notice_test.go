@@ -2,12 +2,14 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
+	"github.com/ruanbarroso/barroso-harness/internal/subagent"
 )
 
 // recTurn records every prompt it runs and answers with a fixed text; when
@@ -82,13 +84,62 @@ func TestInitializeAdvertisesSubagentNoticesOnlyWhenEnabled(t *testing.T) {
 	h2.a.HabilitarAvisosSubagentes()
 	h2.send(t, MetInitialize, 1, map[string]any{"protocolVersion": 1})
 	waitLines(t, h2.out, 1)
-	if !strings.Contains(h2.out.String(), `"_meta":{"`+SubagentNoticesCap+`":true}`) {
-		t.Fatalf("capability missing: %s", h2.out.String())
+	if !strings.Contains(h2.out.String(), `"`+SubagentNoticesCap+`":true`) || !strings.Contains(h2.out.String(), `"`+SubagentActivityCap+`":true`) {
+		t.Fatalf("sub-agent capabilities missing: %s", h2.out.String())
 	}
 }
 
 // The regression: in -acp the sub-agent results were lost. Now a notice runs
 // as a turn of the parent, streamed to the client and closed by turnEnd.
+func TestSubagentActivityIsTaggedAndToolCallClosesByChildID(t *testing.T) {
+	h := setup(t, &recTurn{})
+	h.a.HabilitarAvisosSubagentes()
+	h.send(t, MetSessionNovo, 1, map[string]any{"cwd": t.TempDir()})
+	waitLines(t, h.out, 1)
+
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{Tipo: subagent.EventoPensamento, Texto: "reasoning"})
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{Tipo: subagent.EventoNota, Texto: "checking"})
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{ID: "child-call", Tipo: subagent.EventoToolCall, Nome: "read_file", Args: `{"path":"README.md"}`, Executando: true})
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{ID: "child-call", Tipo: subagent.EventoToolCall, Nome: "read_file", Args: `{"path":"README.md"}`, Texto: "file contents"})
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{Tipo: subagent.EventoResposta, Texto: "done"})
+
+	lines := readLines(t, h.out)
+	if len(lines) != 6 {
+		t.Fatalf("expected session creation plus five child activity updates, got %d: %s", len(lines), h.out.String())
+	}
+	wantUpdates := []string{"agent_thought_chunk", "agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"}
+	wantKinds := []string{"thinking", "note", "tool_call", "tool_call", "assistant"}
+	var callID string
+	for i, want := range wantUpdates {
+		update := lines[i+1].Params.Update
+		if update.SessionUpdate != want {
+			t.Fatalf("update %d = %q, want %q", i, update.SessionUpdate, want)
+		}
+		var meta map[string]struct {
+			TaskID string `json:"taskId"`
+			Kind   string `json:"kind"`
+		}
+		if err := json.Unmarshal(update.Meta, &meta); err != nil {
+			t.Fatalf("update %d metadata: %v", i, err)
+		}
+		activity := meta[SubagentActivityMeta]
+		if activity.TaskID != "t7" || activity.Kind != wantKinds[i] {
+			t.Fatalf("update %d child metadata = %+v", i, activity)
+		}
+		if update.SessionUpdate == "tool_call" {
+			callID = update.ToolCallID
+			if update.Status != "in_progress" || update.Title != "read_file" {
+				t.Fatalf("child tool start = %+v", update)
+			}
+		}
+		if update.SessionUpdate == "tool_call_update" {
+			if update.ToolCallID != callID || update.Status != "completed" || update.Content.Blocks[0].Text != "file contents" {
+				t.Fatalf("child tool result = %+v", update)
+			}
+		}
+	}
+}
+
 func TestSubagentNoticeRunsParentTurnAndEndsWithTurnEnd(t *testing.T) {
 	turn := &recTurn{}
 	h := setup(t, turn)

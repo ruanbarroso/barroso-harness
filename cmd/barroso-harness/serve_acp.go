@@ -141,6 +141,9 @@ func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) {
 		}
 		return subagent.AvisoTerminadas(ts, g.Ativas()), true
 	}
+	g.AoAtividade(func(taskID string, event subagent.Evento) {
+		ag.AvisarAtividadeSubagente(id, taskID, event)
+	})
 	g.AoTerminar(func() { ag.AvisarSubagentes(id, fetch) })
 }
 

@@ -161,6 +161,17 @@ func TestSpawnRunsAndResultReturnsWithoutDelegationTools(t *testing.T) {
 	g := Novo(Config{Nome: "task"})
 	g.Vincular(context.Background())
 	g.ConfigPai(cfg)
+	activity := make(chan struct {
+		taskID string
+		event  Evento
+	}, 8)
+	g.AoAtividade(func(taskID string, event Evento) {
+		_ = g.Fotos() // would deadlock if callbacks ran under the manager lock
+		activity <- struct {
+			taskID string
+			event  Evento
+		}{taskID: taskID, event: event}
+	})
 	specs := append(Especificacoes(g, cfg), statusSpec(g, "task"), resultSpec(g, "task"))
 
 	byName := map[string]tools.Spec{}
@@ -215,6 +226,24 @@ func TestSpawnRunsAndResultReturnsWithoutDelegationTools(t *testing.T) {
 	}
 	if events[len(events)-1].Texto != "task done" {
 		t.Fatalf("assistant event lost the final text: %+v", events[len(events)-1])
+	}
+	var sawToolStart, sawToolResult, sawAnswer bool
+	for len(activity) > 0 {
+		observed := <-activity
+		if observed.taskID != id {
+			t.Fatalf("activity task id = %q, want %q", observed.taskID, id)
+		}
+		switch {
+		case observed.event.Tipo == EventoToolCall && observed.event.Executando:
+			sawToolStart = true
+		case observed.event.Tipo == EventoToolCall && !observed.event.Executando:
+			sawToolResult = observed.event.Texto != ""
+		case observed.event.Tipo == EventoResposta:
+			sawAnswer = observed.event.Texto == "task done"
+		}
+	}
+	if !sawToolStart || !sawToolResult || !sawAnswer {
+		t.Fatalf("activity callback missed tool/answer events: start=%v result=%v answer=%v", sawToolStart, sawToolResult, sawAnswer)
 	}
 	// Snapshots do not share the event slice with the running task.
 	events[0].Nome = "changed"

@@ -31,6 +31,12 @@ import (
 // SubagentNoticesCap is the _meta key advertised in agentCapabilities.
 const SubagentNoticesCap = "barroso/subagentNotices"
 
+// SubagentActivityCap announces tagged live events from child tasks.
+const SubagentActivityCap = "barroso/subagentActivity"
+
+// SubagentActivityMeta marks a session/update as belonging to one child task.
+const SubagentActivityMeta = "barroso/subagentActivity"
+
 // TurnEndMeta is the _meta key of the session_info_update that closes a turn
 // the agent started on its own.
 const TurnEndMeta = "barroso/turnEnd"

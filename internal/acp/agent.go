@@ -90,6 +90,9 @@ type session struct {
 	autoIdle   chan struct{}
 	wake       chan struct{}
 	fetch      func() (string, bool)
+
+	// childRenderers keep tool-call IDs stable between each child's start and result.
+	childRenderers map[string]*acpRenderer
 }
 
 // Agente is the ACP server. It is born with the config captured in Novo
@@ -112,8 +115,7 @@ type Agente struct {
 	// compaction: the client advertised clientCapabilities.session.compaction
 	// in initialize, so compaction_update may be sent (see Guardrail).
 	compaction atomic.Bool
-	// subNotices: the host delivers sub-agent notices (AvisarSubagentes), so
-	// initialize advertises barroso/subagentNotices.
+	// subNotices: the host delivers sub-agent notices and live child events.
 	subNotices atomic.Bool
 	// wire is the writer of the Handle loop, used by turns the agent starts on
 	// its own (sub-agent notices), which have no request to answer.
@@ -272,7 +274,10 @@ func (a *Agente) initialize(w io.Writer, req Request) error {
 		"loadSession": a.Carregar != nil,
 	}
 	if a.subNotices.Load() {
-		caps["_meta"] = map[string]any{SubagentNoticesCap: true}
+		caps["_meta"] = map[string]any{
+			SubagentNoticesCap:  true,
+			SubagentActivityCap: true,
+		}
 	}
 	return a.respond(w, NovaResposta(req.ID, map[string]any{
 		"protocolVersion":   v,
@@ -662,6 +667,7 @@ type acpRenderer struct {
 	a       *Agente
 	w       io.Writer
 	session string
+	childID string
 
 	mu   sync.Mutex
 	last string // toolCallId of the last tool_call, for Eco to attach to
@@ -673,7 +679,7 @@ type acpRenderer struct {
 func (r *acpRenderer) Resposta(text string) {
 	// The chunk content is a single-block OBJECT ({type,text}), not two loose
 	// fields on the update: that is the format the ACP client validates.
-	r.emit("agent_message_chunk", map[string]any{
+	r.emitTagged("assistant", "agent_message_chunk", map[string]any{
 		"content": map[string]any{"type": "text", "text": text},
 	})
 }
@@ -687,7 +693,7 @@ func (r *acpRenderer) Tool(name string, dur time.Duration, failed bool) {
 	r.mu.Lock()
 	r.last = id
 	r.mu.Unlock()
-	r.emit("tool_call", map[string]any{
+	r.emitTagged("tool_call", "tool_call", map[string]any{
 		"toolCallId": id,
 		"title":      name,
 		"kind":       "other",
@@ -698,14 +704,18 @@ func (r *acpRenderer) Tool(name string, dur time.Duration, failed bool) {
 // Nota is the text of a round that also called tools ("let me check X"). It
 // goes out as agent_message_chunk: a client that sees a tool_call after text
 // knows that text was an intermediate message, not the answer.
-func (r *acpRenderer) Nota(text string) { r.Resposta(text) }
+func (r *acpRenderer) Nota(text string) {
+	r.emitTagged("note", "agent_message_chunk", map[string]any{
+		"content": map[string]any{"type": "text", "text": text},
+	})
+}
 
 // Pensou carries provider-exposed reasoning through ACP. The Agents connector
 // appends agent_thought_chunk to the active Thinking row and persists its detail
 // when that row closes, so it remains clickable after the turn. This is distinct
 // from Pensando's empty keepalive/session-state update.
 func (r *acpRenderer) Pensou(text string, _ time.Duration) {
-	r.emit("agent_thought_chunk", map[string]any{
+	r.emitTagged("thinking", "agent_thought_chunk", map[string]any{
 		"content": map[string]any{"type": "text", "text": text},
 	})
 }
@@ -721,7 +731,7 @@ func (r *acpRenderer) ToolComecou(id, name, args string) {
 	r.ids[id] = toolCallID
 	r.last = toolCallID
 	r.mu.Unlock()
-	r.emit("tool_call", map[string]any{
+	r.emitTagged("tool_call", "tool_call", map[string]any{
 		"toolCallId": toolCallID,
 		"title":      name,
 		"kind":       "other",
@@ -763,7 +773,7 @@ func (r *acpRenderer) ToolTerminou(id, _, _, output string, _ time.Duration, fai
 	if echo := shortEcho(output); echo != "" {
 		upd["content"] = []map[string]any{{"type": "text", "text": echo}}
 	}
-	r.emit("tool_call_update", upd)
+	r.emitTagged("tool_call", "tool_call_update", upd)
 }
 
 func (r *acpRenderer) Eco(output string) {
@@ -875,7 +885,19 @@ func (r *acpRenderer) Tokens(int, int, time.Duration, bool) {}
 // owns the wire, and a tool cannot abort the turn because the client closed
 // its read side — the turn is over, the response will fail on its own.
 func (r *acpRenderer) emit(sessionUpdate string, update map[string]any) {
+	r.emitTagged(sessionUpdate, sessionUpdate, update)
+}
+
+func (r *acpRenderer) emitTagged(activityKind, sessionUpdate string, update map[string]any) {
 	update["sessionUpdate"] = sessionUpdate
+	if r.childID != "" {
+		meta, _ := update["_meta"].(map[string]any)
+		if meta == nil {
+			meta = make(map[string]any)
+			update["_meta"] = meta
+		}
+		meta[SubagentActivityMeta] = map[string]any{"taskId": r.childID, "kind": activityKind}
+	}
 	n := NovaNotificacao("session/update", map[string]any{
 		"sessionId": r.session,
 		"update":    update,
