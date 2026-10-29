@@ -1002,7 +1002,8 @@ func systemPrompt(cwd, baroMD string, canSpawn bool, now time.Time, deferred str
 	}
 
 	sb.WriteString("\n## Progress updates\n" +
-		"- For substantial, multi-step tasks, keep the user informed with brief progress updates at meaningful milestones. Before a lengthy phase of tool work, give one concise, concrete sentence about what you are checking or doing; after significant progress, briefly say what you found and what you are tackling next.\n" +
+		"- For substantial, multi-step tasks, keep the user informed with brief, user-visible progress updates at meaningful milestones. Before a lengthy phase of tool work, send one concise, concrete sentence about what you are checking or doing; after significant progress, briefly say what you found and what you are tackling next.\n" +
+		"- Emit every progress update as ordinary assistant message text (`content`/commentary), never in private reasoning or a `thinking` channel. Do not expose or summarize chain-of-thought. When tools are needed, put the update in the visible assistant text of the same response as the tool call, then continue working.\n" +
 		"- Keep updates to one short sentence, grounded in the work. Do not give a full upfront plan, narrate routine tool calls, or send an update before every tool or batch.\n" +
 		"- Updates are commentary, not questions or permission requests: continue the work immediately. Skip them for simple tasks or when there is nothing useful to report; never invent progress or claim completion before verifying it.\n")
 
