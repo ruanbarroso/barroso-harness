@@ -367,10 +367,15 @@ func TestSendAppliesAgentCompaction(t *testing.T) {
 	if c, _ := msgs[1]["content"].(string); !strings.Contains(c, "cause in parse.go:42") {
 		t.Fatalf("state missing from the request: %v", msgs[1])
 	}
-	for _, m := range msgs {
+	// The old request no longer travels as a message of its own; only the
+	// harness's facts block (inside the state) remembers what was asked.
+	for _, m := range msgs[2:] {
 		if c, _ := m["content"].(string); strings.Contains(c, "explore the parser") {
 			t.Fatalf("old request should have left the request: %v", msgs)
 		}
+	}
+	if c, _ := msgs[1]["content"].(string); !strings.Contains(c, "user asked: explore the parser") {
+		t.Fatalf("the facts block should keep the earlier request: %v", msgs[1])
 	}
 	h := s.History()
 	if !strings.HasPrefix(h[0].Conteudo, summaryPrefix) || h[len(h)-1].Conteudo != "done" {

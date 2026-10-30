@@ -122,6 +122,14 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 	for _, e := range events {
 		switch e.Kind {
 		case "user_message", "assistant", "tool_call", "tool_result":
+		case eventContextPrune:
+			var c struct {
+				Results []prunedResult `json:"results"`
+			}
+			if json.Unmarshal([]byte(e.Payload), &c) == nil {
+				out = applyPrunedResults(out, c.Results)
+			}
+			continue
 		case eventCompaction, eventCompactionEN:
 			// Re-apply the agent compaction where it happened: without this,
 			// /resume and session/load would bring back the conversation the
@@ -130,13 +138,21 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 			var c struct {
 				Estado string `json:"estado"`
 				State  string `json:"state"`
+				// Mantem is how many of the turn's newest tool rounds the
+				// compaction kept (compactTurn). Absent in events written before
+				// it existed: those replay as compactHistory, as they ran.
+				Mantem int `json:"mantem"`
 			}
 			if json.Unmarshal([]byte(e.Payload), &c) == nil {
 				state := c.Estado
 				if strings.TrimSpace(state) == "" {
 					state = c.State
 				}
-				if strings.TrimSpace(state) != "" {
+				switch {
+				case strings.TrimSpace(state) == "":
+				case c.Mantem > 0:
+					out, _ = compactTurn(out, state, c.Mantem)
+				default:
 					out = compactHistory(out, state)
 				}
 			}

@@ -68,7 +68,7 @@ type respRequest struct {
 	Instructions      string         `json:"instructions"`
 	Input             []any          `json:"input"`
 	Tools             []respTool     `json:"tools,omitempty"`
-	ToolChoice        string         `json:"tool_choice,omitempty"`
+	ToolChoice        any            `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool          `json:"parallel_tool_calls,omitempty"`
 	Reasoning         *respReasoning `json:"reasoning,omitempty"`
 	Include           []string       `json:"include,omitempty"`
@@ -93,6 +93,22 @@ func toolResponses(t map[string]any) respTool {
 		out.Parameters = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
 	return out
+}
+
+// escolhaResponses returns the Responses tool_choice: auto normally, or the
+// one named function forced for a context-compaction request. A missing name
+// falls back to auto rather than emitting a reference to an absent tool.
+func (c *Cliente) escolhaResponses(tools []respTool) any {
+	name := c.toolChoice
+	if name == "" {
+		return "auto"
+	}
+	for _, t := range tools {
+		if t.Name == name {
+			return map[string]any{"type": "function", "name": name}
+		}
+	}
+	return "auto"
 }
 
 func (i *respItem) UnmarshalJSON(data []byte) error {
@@ -200,7 +216,7 @@ func (c *Cliente) corpoResponses(system string, msgs []Mensagem, tools []map[str
 		req.Tools = append(req.Tools, toolResponses(t))
 	}
 	if len(req.Tools) > 0 {
-		req.ToolChoice = "auto"
+		req.ToolChoice = c.escolhaResponses(req.Tools)
 		if c.cfg.DisableParallelToolCalls {
 			f := false
 			req.ParallelToolCalls = &f

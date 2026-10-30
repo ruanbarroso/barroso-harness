@@ -169,6 +169,7 @@ type Rodada struct {
 type Cliente struct {
 	cfg           Config
 	maxOut        int            // output cap for this request (ComTeto); 0 = MaxTokens()
+	toolChoice    string         // one named function forced for this request (ComToolChoice)
 	aviso         AvisoRetry     // reported before each retry (ComAviso); nil = silent
 	protocolState *protocolState // shared by request-scoped copies; caches a missing Responses route
 	// conversa is the conversation identity the canonical opencode session
@@ -211,6 +212,16 @@ func (c *Cliente) MaxTokens() int {
 func (c *Cliente) ComTeto(n int) *Cliente {
 	c2 := *c
 	c2.maxOut = n
+	return &c2
+}
+
+// ComToolChoice returns a copy that asks the provider to call exactly this
+// named function in this request. An empty name keeps the normal "auto" mode.
+// Used only after a working-target compaction demand; the model remains free
+// on every other round.
+func (c *Cliente) ComToolChoice(name string) *Cliente {
+	c2 := *c
+	c2.toolChoice = strings.TrimSpace(name)
 	return &c2
 }
 
@@ -377,12 +388,30 @@ func (c *Cliente) corpoChat(system string, msgs []Mensagem, tools []map[string]a
 		body["reasoning_effort"] = effort
 	}
 	body["tools"] = wireTools
-	body["tool_choice"] = "auto"
+	body["tool_choice"] = c.escolhaChat(wireTools)
 	if c.cfg.DisableParallelToolCalls && len(wireTools) > 0 {
 		// The field is only meaningful (and only accepted) alongside tools.
 		body["parallel_tool_calls"] = false
 	}
 	return json.Marshal(body)
+}
+
+// escolhaChat returns the Chat Completions tool_choice: auto normally, or the
+// one named function forced for a context-compaction request. A missing name
+// falls back to auto rather than emitting a reference to an absent tool.
+func (c *Cliente) escolhaChat(wireTools []any) any {
+	name := c.toolChoice
+	if name == "" {
+		return "auto"
+	}
+	for _, t := range wireTools {
+		tm, _ := t.(map[string]any)
+		fn, _ := tm["function"].(map[string]any)
+		if fn != nil && fn["name"] == name {
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+		}
+	}
+	return "auto"
 }
 
 // textoDeResultado extrae o texto de um Content do oaiMsg (assistente leva

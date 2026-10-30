@@ -182,6 +182,12 @@ type Config struct {
 	// overflows). These values are part of the on-disk format.
 	PoliticaContexto string `json:"context_policy,omitempty"`
 
+	// AlvoContexto is the turn's WORKING target in tokens (config.json:
+	// context_target): the size at which the policy asks the model to compact,
+	// which is not the same thing as Janela (the physical limit). 0 = derived
+	// from the window by budget.AlvoTrabalho.
+	AlvoContexto int `json:"context_target,omitempty"`
+
 	// ToolDisclosure: "auto" (default; progressive past ~8k tokens of tool
 	// schemas), "full" (every tool in every request) or "progressive" (MCP
 	// and management tools behind tool_search/tool_call).

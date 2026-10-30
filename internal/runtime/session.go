@@ -383,6 +383,24 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	reactiveCompacted := false
 	compacted := false
 	forcedCompaction := false
+	// The working-target ladder (target.go): only the "agente" policy has it.
+	// avisado: the model was already told to compact since the last compaction;
+	// demands: how many times it was REQUIRED to; desistiu: the mechanical
+	// compaction freed too little, so the window guardrail is left alone.
+	alvo := 0
+	if policy(s.config.PoliticaContexto) == PoliticaAgente {
+		alvo = budget.AlvoTrabalho(s.config.Janela, s.config.AlvoContexto)
+	}
+	avisado, demands, desistiu := false, 0, false
+	// forceCompact: the request MUST be a context_compact call, enforced on
+	// the wire (dealer.ComToolChoice), not only in the prompt text. A model
+	// that ignores a written demand keeps the old behaviour of simply
+	// answering; measured on the fleet it is the common case.
+	forceCompact := false
+	// forceNotice: the text of the demand that goes with the forced
+	// tool_choice. It travels in THIS request's system prompt only — never
+	// in the transcript — so a demand cannot itself inflate the next prompt.
+	forceNotice := ""
 	// Whole-turn totals: each tool cycle spends request and response, and the
 	// UI footer shows the total, not the last cycle's. Same for the money cost:
 	// it restarts on every turn.
@@ -427,13 +445,113 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 			s.day = time.Now()
 		}
 		system := systemPrompt(cwd, baroMD, hasTool(list, "subagent"), s.day, deferred)
+		requestHistory := working
+		if forceNotice != "" {
+			requestHistory = append(append([]dealer.Mensagem(nil), working...), dealer.Mensagem{Role: "user", Conteudo: forceNotice})
+		}
 
 		// Measured without the image bytes: see dealer.CorpoEstimativa.
-		body, err := s.dealer.CorpoEstimativa(system, working, schemas)
+		body, err := s.dealer.CorpoEstimativa(system, requestHistory, schemas)
 		if err != nil {
 			return err
 		}
 		ev := budget.Avaliar(string(body), s.config.Janela, s.est)
+		if alvo > 0 {
+			step := degrau(ev.TokensEntrada, alvo)
+			canCompact := hasTool(list, compactToolName)
+			guard := func(tipo string, extra map[string]any) {
+				ev := map[string]any{
+					"tipo":       tipo,
+					"politica":   PoliticaAgente,
+					"janela":     s.config.Janela,
+					"alvo":       alvo,
+					"estimativa": ev.TokensEntrada,
+				}
+				for k, v := range extra {
+					ev[k] = v
+				}
+				s.record("guardrail", ev)
+			}
+			// Advisory: it rides on THIS request's system prompt and is never
+			// persisted in the history. A persisted nudge would grow every
+			// later prompt by itself, and Resume would rebuild it as an
+			// instruction the model had already answered.
+			if (step == "aviso" || step == "poda") && !avisado && canCompact {
+				avisado = true
+				note := fmt.Sprintf(avisoContext, ev.TokensEntrada, alvo)
+				s.record("context_aviso", map[string]any{"politica": PoliticaAgente, "estimativa": ev.TokensEntrada, "alvo": alvo})
+				guard("alvo_aviso", nil)
+				requestHistory = append(append([]dealer.Mensagem(nil), working...), dealer.Mensagem{Role: "user", Conteudo: note})
+				body, err = s.dealer.CorpoEstimativa(system, requestHistory, schemas)
+				if err != nil {
+					return err
+				}
+				ev = budget.Avaliar(string(body), s.config.Janela, s.est)
+				step = degrau(ev.TokensEntrada, alvo)
+			}
+			// 1. Past the batch floor: stub OLD tool results down to the
+			// destination, in one go (hysteresis: the cached prefix is
+			// rewritten once and then stays stable for many rounds).
+			if step == "poda" || step == "exige" {
+				want := s.est.Bytes(ev.TokensEntrada - budget.Percent(alvo, budget.DestinoPoda))
+				if p, freed, items := podar(working, want); freed > 0 {
+					working = p
+					compacted = true
+					r.Guardrail(true)
+					guard("alvo_poda", map[string]any{"liberado_bytes": freed, "resultados": len(items)})
+					// Keep the full results in the immutable log/blob store, but
+					// reapply these exact stubs on Resume so the next prompt does
+					// not rehydrate the context we just deliberately cleared.
+					s.record(eventContextPrune, map[string]any{"resultados": items})
+					continue
+				}
+			}
+			// 2. Stubs are not enough and the target is crossed: the model
+			// is REQUIRED to write the state; after maxDemands the harness
+			// writes it mechanically.
+			if step == "exige" && !desistiu {
+				if canCompact && forceCompact {
+					// This iteration IS the forced tool request. Let it reach the
+					// provider; do not fall through to mechanical compaction yet.
+				} else if canCompact && demands < maxDemands {
+					demands++
+					forceCompact = true
+					forceNotice = fmt.Sprintf(exigeContext, ev.TokensEntrada, alvo)
+					s.record("context_demand", map[string]any{"politica": PoliticaAgente, "estimativa": ev.TokensEntrada, "alvo": alvo, "pedido": demands})
+					guard("alvo_exige", map[string]any{"pedido": demands})
+					continue // rebuild the body and send it with tool_choice forced
+				} else {
+					state := forcedState(working)
+					if state == "" {
+						state = "(no earlier conversation: the context policy dropped the older tool rounds of this turn)"
+					}
+					before := historyBytes(working)
+					out, ok := compactTurn(working, state, compactKeepUnits)
+					if !ok || historyBytes(out) > before*9/10 {
+						desistiu = true // freeing under 10%: leave the rest to the window guardrail
+					} else {
+						working = out
+						floor = 0
+						compacted = true
+						avisado, demands = false, 0
+						r.Guardrail(true)
+						s.record(eventCompaction, map[string]any{
+							"politica":     PoliticaAgente,
+							"tipo":         "alvo",
+							"ciclo":        cycle,
+							"bytes_antes":  before,
+							"bytes_depois": historyBytes(working),
+							"estado_bytes": len(state),
+							"estado":       state,
+							"mantem":       compactKeepUnits,
+						})
+						continue
+					}
+				}
+			}
+			// Mechanical batch pruning may have crossed the threshold; the
+			// request is rebuilt on the next loop iteration.
+		}
 		if !ev.Cabe {
 			pruned := prune(working, &floor, s.est.Bytes(ev.TokensEntrada+ev.TokensSaida-s.config.Janela))
 			if pruned == nil && !forcedCompaction {
@@ -528,10 +646,14 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		if limit != cli.MaxTokens() {
 			cli = cli.ComTeto(limit)
 		}
+		if forceCompact {
+			cli = cli.ComToolChoice(compactToolName)
+		}
 		if rr, ok := r.(RendererRetry); ok {
 			cli = cli.ComAviso(rr.Retentando)
 		}
-		round, err := cli.RodarContext(ctx, system, working, schemas)
+		forcedRequest := forceCompact
+		round, err := cli.RodarContext(ctx, system, requestHistory, schemas)
 		if err != nil {
 			if contextOverflow(err) && !reactiveCompacted {
 				r.Guardrail(false)
@@ -570,6 +692,19 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				}
 			}
 			return err
+		}
+		if forcedRequest && !validCompactCall(round.Tools) {
+			// Gateways may silently ignore tool_choice. Never execute a different
+			// tool, return text as the user's answer, or accept a malformed
+			// state as a successful compaction. The ladder asks again once, then
+			// the bounded mechanical fallback takes over.
+			s.record("context_demand_ignored", map[string]any{"politica": PoliticaAgente, "alvo": alvo, "pedido": demands, "fim": round.Fim})
+			forceCompact = false
+			continue
+		}
+		forceCompact = false // the forced request completed; a failed call may earn one more demand
+		if forcedRequest {
+			forceNotice = ""
 		}
 		if round.ProtocolFallback {
 			base := ""
@@ -788,11 +923,15 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		}
 		if state := compactedState(round.Tools, results); state != "" {
 			before := historyBytes(working)
-			working = compactHistory(working, state)
+			// compactTurn also drops the turn's OLDER tool rounds: compactHistory
+			// alone freed almost nothing when the weight sat inside the turn.
+			working, _ = compactTurn(working, state, compactKeepUnits)
 			floor = 0 // the history changed shape; pruning restarts from the beginning
 			compacted = true
+			avisado, demands, desistiu = false, 0, false
 			r.Guardrail(true)
-			// Kind and keys kept as originally persisted (see persist.go).
+			// Kind and keys kept as originally persisted (see persist.go);
+			// "mantem" tells Resume how to replay it.
 			s.record(eventCompaction, map[string]any{
 				"politica":     PoliticaAgente,
 				"ciclo":        cycle,
@@ -800,6 +939,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				"bytes_depois": historyBytes(working),
 				"estado_bytes": len(state),
 				"estado":       state,
+				"mantem":       compactKeepUnits,
 			})
 		}
 		// Safe boundary: the round's calls and results are complete, the next
@@ -1013,6 +1153,12 @@ func systemPrompt(cwd, baroMD string, canSpawn bool, now time.Time, deferred str
 		"- After changing code, verify it: build and run the relevant tests, and fix what you broke.\n" +
 		"- Use tools to act and TEXT to talk to the user. When the task is done, reply with a short plain-text answer: what changed and what the user must know. No long recaps.\n" +
 		"- Messages starting with [system update] come from the harness, not the user: they announce changes to instructions, skills or tools during the session. The latest update wins over anything earlier, including this prompt's BARROSO.md section.\n")
+
+	sb.WriteString("\n## Context management\n" +
+		"- Your context is finite and gets worse as it grows: keep it small on purpose. Stay under what you need: read the range you need (not whole large files again), narrow greps, and do not re-read what you already have.\n" +
+		"- context_compact is how you keep long work coherent. Call it at every milestone (root cause found, change made and verified, exploration finished, a sub-goal closed), BEFORE the next step, and whenever a [context] notice asks. A compaction at a milestone loses nothing: you write the state, the harness keeps the user's requests and the file list, and the log stays searchable.\n" +
+		"- A tool result shown as \"compacted by the context policy\" was removed from the context to save space: call it again with the same arguments if you still need it. Before you re-read a file you changed, check your own state first.\n" +
+		"- [context] messages come from the harness, not the user. Follow them.\n")
 
 	if deferred != "" {
 		sb.WriteString("\n## Deferred tools\n" +

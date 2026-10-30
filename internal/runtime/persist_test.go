@@ -913,6 +913,9 @@ func TestGuardrailReducesLongTurnWhenPruneCannot(t *testing.T) {
 	const id = "bh-20240101140000-0004"
 	cfg := fakeConfig(t, srv.URL)
 	cfg.Janela = 60_000
+	// This test is about the WINDOW guardrail's last lever; the working-target
+	// ladder (agente policy) would act first and has its own tests.
+	cfg.PoliticaContexto = PoliticaLimiar
 
 	s := NewSessionWithStore(cfg, st, id)
 	s.Injetar(weightTool())

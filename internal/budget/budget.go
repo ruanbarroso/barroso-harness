@@ -15,7 +15,65 @@ const (
 	// ReservaOperacional: estimated format overhead (tool schemas, message
 	// structure, provider-invisible tokens).
 	ReservaOperacional = 8 << 10
+
+	// AlvoTrabalhoPadrao is the default working target of a turn, in tokens: the
+	// point where compaction is ASKED of the model. It is deliberately far below
+	// the model's window — measured on the fleet (Bruce, Greg, Zoe, 2026-10-29):
+	// context rot degrades recall well before the window ends, and the requests
+	// that reach the gateway with 500k-1M tokens buy a rotating prefix that costs
+	// cache writes on every compaction.
+	AlvoTrabalhoPadrao = 200_000
+	// PercentualAlvoTrabalho is how much of the window the working target takes
+	// when no manual target is set, capped by AlvoTrabalhoPadrao: a 1M-token
+	// catalog window does not become a 1M-token working set, and a 200k window
+	// keeps 20% free for the round in flight.
+	PercentualAlvoTrabalho = 80
 )
+
+// AlvoTrabalho is the turn's working target, in tokens: the size at which the
+// policy asks the model to compact rather than letting the turn grind up to the
+// physical window. manual > 0 is honoured verbatim; otherwise it is the smaller
+// of AlvoTrabalhoPadrao and PercentualAlvoTrabalho of the model's window. 0 (no
+// known window and no manual target) means the policy only reacts to the
+// provider's rejection — the guardrail stays the safety net.
+func AlvoTrabalho(window, manual int) int {
+	if manual < 0 {
+		return 0 // explicitly off
+	}
+	if window <= 0 {
+		// A known physical limit is preferable, but Zoe's config did not
+		// publish one. Still keep a working target; provider rejection is the
+		// physical safety net.
+		if manual > 0 {
+			return manual
+		}
+		return AlvoTrabalhoPadrao
+	}
+	physical := window - ReservaSaida - ReservaOperacional
+	if physical <= 0 {
+		return 0
+	}
+	ceiling := min(AlvoTrabalhoPadrao, window*PercentualAlvoTrabalho/100, physical)
+	if manual > 0 {
+		return min(manual, ceiling)
+	}
+	return ceiling
+}
+
+// Degraus of the working-target ladder, as fractions (in percent) of the
+// target. Aviso: the model is told, once per cycle, to compact at its next
+// milestone. Poda: old tool results are stubbed in one batch, down to
+// DestinoPoda, so the cache prefix is rewritten once and then stays stable for
+// many rounds. Exige: the model is REQUIRED to write the working state.
+const (
+	DegrauAviso = 65
+	DegrauPoda  = 85
+	DestinoPoda = 50
+	DegrauExige = 100
+)
+
+// Percent returns pct percent of n.
+func Percent(n, pct int) int { return n * pct / 100 }
 
 // Window is the model's context window (tokens). 0 = unknown: with no
 // published window the guardrail stays inactive and the policy only acts

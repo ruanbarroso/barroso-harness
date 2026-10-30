@@ -145,7 +145,7 @@ func stubResult(h []dealer.Mensagem, i int, freed *int) bool {
 		return false
 	}
 	before := len(h[i].Conteudo)
-	h[i].Conteudo = fmt.Sprintf("(earlier result of %s compacted by the guardrail; request it again with a smaller range if you need the content)", h[i].ToolName)
+	h[i].Conteudo = stubText(h, i)
 	*freed += before - len(h[i].Conteudo)
 	return true
 }

@@ -155,6 +155,16 @@ The runtime threads its session id in (`ComConversa`), the dealer handles the re
 - `agente` (default): the model has the `context_compact` tool and compacts at a task milestone, writing the working state that replaces the history before the current request. The budget guardrail remains as a safety net.
 - `limiar`: no `context_compact`; only the guardrail compacts, when the window overflows.
 
+### Working target (policy `agente`)
+
+The window is a physical limit, not a working set: waiting for it meant requests of 500k–1M tokens at the gateway and a model that almost never compacted on its own. The `agente` policy therefore has a **working target** (`"context_target"` in tokens; default: the smaller of 200k and 80% of the window; `-1` turns the ladder off). Measured percentages are of that target:
+
+1. **65%** — a one-request advisory rides on the prompt ("compact at your next milestone"). It is never written to the transcript, so it cannot inflate later prompts.
+2. **85%** — old tool results are stubbed in one batch, down to 50%. The stub carries the tool name and arguments, so the model can re-issue the exact call. One batch buys many rounds of a stable cached prefix. The batch is logged (`context_prune`) and re-applied by `/resume`.
+3. **100%** — `context_compact` is *required*: the request goes out with `tool_choice` forced to it (Chat and Responses). A reply that is not a valid `context_compact` call is never executed or accepted as an answer; after 2 demands the harness writes the state mechanically.
+
+`context_compact` replaces the earlier history **and the turn's older tool rounds**, keeping the current request and the newest 3 rounds verbatim. The harness appends, deterministically, the user's requests and the files read/changed (accumulated across compactions), so the model-written state does not have to carry them. The compaction event records `mantem` so `/resume` replays it exactly.
+
 Each compaction is stored in `sessions.db` with the policy that produced it, and `/context` (old alias `/contexto`) aggregates by policy (agent compactions, proactive guardrail, **reactive** guardrail — the sign that the policy came too late — and how much the history shrank). `/resume` and `session/load` re-apply the compaction, so the resumed session comes back with the state, not with the already-summarized conversation.
 
 ## Prompt hooks

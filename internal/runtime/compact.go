@@ -49,6 +49,7 @@ func policy(v string) string {
 const (
 	eventCompaction   = "compactacao"
 	eventCompactionEN = "compaction"
+	eventContextPrune = "context_prune"
 )
 
 const compactToolName = "context_compact"
@@ -63,15 +64,24 @@ const maxSummary = 16 << 10
 func compactSpec() tools.Spec {
 	return tools.Spec{
 		Name: compactToolName,
-		Description: "Compacts this conversation's history: everything BEFORE the current request is replaced by the " +
-			"working state you write. Use it at a natural milestone of the task (e.g. you found the cause and are " +
-			"about to edit; you finished exploring) — do not wait for the context to fill up. The state must be " +
-			"enough to carry on: goal, decisions, discovered facts (paths, signatures, values), what has " +
-			"already been changed and the next step. The full log remains retrievable through session_search.",
+		Description: "Compacts this conversation: the earlier history AND the older tool rounds of the current turn are replaced by the " +
+			"working state you write. Kept verbatim: the current request and your newest tool rounds. The harness appends by itself " +
+			"the user's requests and the list of files read/changed, so do not repeat those. Call it at every milestone — root cause " +
+			"found, change made and verified, exploration finished, a sub-goal closed — BEFORE starting the next step, and whenever a " +
+			"[context] notice asks. Do not call it halfway through a step. The state is ALL you will remember of what it replaces, so " +
+			"write it as a handoff to yourself, with these sections: " +
+			"Goal (what the user wants, in their terms); " +
+			"Constraints (the user's rules, preferences and corrections, verbatim when short); " +
+			"Decisions (what was decided and WHY, including approaches rejected); " +
+			"Facts (paths with line numbers, signatures, commands, ids, values, exact error messages — whatever you would otherwise re-read); " +
+			"Done (what changed and how it was verified); " +
+			"Open (failing tests, unresolved errors, things to check); " +
+			"Next (the exact next action). " +
+			"Dense and concrete beats long: no narration, no pleasantries. Anything you omit stays recoverable through session_search / session_retrieve.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"state": map[string]any{"type": "string", "description": "structured working state that replaces the earlier history"},
+				"state": map[string]any{"type": "string", "description": "handoff state with these sections: Goal; Constraints (the user's rules, verbatim when short); Decisions and why; Facts (paths with line numbers, signatures, commands, ids, values, exact error messages); Done and how it was verified; Open issues; the exact Next action. Dense and concrete, no narration."},
 			},
 			"required": []string{"state"},
 		},
@@ -80,7 +90,7 @@ func compactSpec() tools.Spec {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("compaction scheduled: the history before this request will be replaced by the state (%d characters) at the end of this round", len(state)), nil
+			return fmt.Sprintf("compaction accepted: at the end of this round the earlier history and your older tool rounds are replaced by your state (%d characters); the current request and your newest rounds stay. Continue with the next step.", len(state)), nil
 		},
 	}
 }
@@ -135,6 +145,8 @@ const loopNoticePrefix = "[loop] "
 func isSynthetic(content string) bool {
 	return content == readImagesNote ||
 		strings.HasPrefix(content, loopNoticePrefix) ||
+		strings.HasPrefix(content, contextNotePrefix) ||
+		strings.HasPrefix(content, UpdatePrefix) ||
 		strings.HasPrefix(content, turnDropNotePrefix)
 }
 
@@ -183,7 +195,7 @@ const turnDropNote = turnDropNotePrefix + " by the guardrail to keep the request
 func forcedState(h []dealer.Mensagem) string {
 	cut := -1
 	for i := len(h) - 1; i >= 0; i-- {
-		if h[i].Role == "user" && !isSummary(h[i].Conteudo) {
+		if h[i].Role == "user" && !isSummary(h[i].Conteudo) && !isSynthetic(h[i].Conteudo) {
 			cut = i
 			break
 		}
