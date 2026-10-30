@@ -339,6 +339,86 @@ func TestLadderFallsBackWhenTheGatewayIgnoresToolChoice(t *testing.T) {
 	}
 }
 
+// claude-*-5-5 behind the BK answers a FORCED tool_choice with HTTP 400
+// tool_choice_nao_suportado (Zoe, conversation 105570). The turn must survive:
+// one rejected attempt, then the mechanical state, and never forced again.
+func TestLadderSurvivesGatewayRejectingForcedToolChoice(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []ladderBody
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b ladderBody
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		if b.forced() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"tool_choice_nao_suportado","message":"\"claude-sonnet-5-5\" só aceita \"tool_choice\" ausente, \"auto\" ou \"none\": o raciocínio adaptativo não permite forçar ferramenta."}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, p := range []any{
+			map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "done"}}}},
+			map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}},
+		} {
+			j, _ := json.Marshal(p)
+			_, _ = w.Write([]byte("data: " + string(j) + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	st := testStore(t)
+	const id = "bh-20240101140000-lad3"
+	cfg := fakeConfig(t, srv.URL)
+	cfg.AlvoContexto = 20_000
+	seedHeavy(t, NewSessionWithStore(cfg, st, id))
+	s := NewSessionWithStore(cfg, st, id)
+	if err := s.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "current request"); err != nil {
+		t.Fatalf("a rejected forced tool_choice must not kill the turn: %v", err)
+	}
+	forced := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, b := range bodies {
+			if b.forced() {
+				n++
+			}
+		}
+		return n
+	}
+	if got := forced(); got != 1 {
+		t.Fatalf("forced requests = %d; want exactly the one the gateway rejected", got)
+	}
+	mu.Lock()
+	last := bodies[len(bodies)-1]
+	mu.Unlock()
+	if last.forced() || len(last.Messages) > 6 {
+		t.Fatalf("the final request must be compacted and unforced: forced=%v messages=%d", last.forced(), len(last.Messages))
+	}
+	h := s.History()
+	if !isSummary(h[0].Conteudo) || h[len(h)-1].Conteudo != "done" {
+		t.Fatalf("history: %+v", h)
+	}
+	if !s.forcedChoiceRejected() {
+		t.Fatal("the rejection must be remembered for this provider/model")
+	}
+
+	// Remembered: a second heavy turn goes straight to the mechanical state.
+	seedHeavy(t, s)
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "again"); err != nil {
+		t.Fatal(err)
+	}
+	if got := forced(); got != 1 {
+		t.Fatalf("forced requests after the second turn = %d; want still 1", got)
+	}
+}
+
 // Below the aviso step nothing happens: no extra request, no note, no prune.
 func TestLadderQuietBelowTheTarget(t *testing.T) {
 	srv := newLadderServer(t, true)

@@ -30,6 +30,7 @@ type Session struct {
 	est                 budget.Estimador
 	key                 string // calibration per (normalized URL, model)
 	protocolFallbackKey string // Responses route known absent for this provider/model in this session
+	noForcedChoiceKey   string // provider/model known to reject a forced tool_choice (HTTP 400 tool_choice_nao_suportado)
 
 	// Persistence is OPTIONAL. A nil store means an in-memory-only session (the
 	// NewSession path, used by -p mode and by tests). With a store, every
@@ -186,6 +187,22 @@ func (s *Session) rebuild() {
 		DisableParallelToolCalls: s.config.ParallelToolCallsOff(),
 		Idle:                     secs(s.config.IdleSecs),
 	})
+}
+
+// forcedChoiceKey identifies the provider/model whose gateway decides whether a
+// forced tool_choice is accepted (independent of the wire protocol).
+func (s *Session) forcedChoiceKey() string {
+	base := ""
+	if p := s.config.Ativo(); p != nil {
+		base = p.BaseURL
+	}
+	return dealer.NormalizarURL(base) + "\x00" + s.config.Model
+}
+
+// forcedChoiceRejected: this provider/model already refused a forced
+// tool_choice in this session, so the ladder must not ask for it again.
+func (s *Session) forcedChoiceRejected() bool {
+	return s.noForcedChoiceKey != "" && s.noForcedChoiceKey == s.forcedChoiceKey()
 }
 
 func protocolCapabilityKey(baseURL, model, protocol string) string {
@@ -513,7 +530,9 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				if canCompact && forceCompact {
 					// This iteration IS the forced tool request. Let it reach the
 					// provider; do not fall through to mechanical compaction yet.
-				} else if canCompact && demands < maxDemands {
+				} else if canCompact && demands < maxDemands && !s.forcedChoiceRejected() {
+					// (a gateway that refuses a forced tool_choice, e.g. claude-*-5-5
+					// with adaptive reasoning, skips straight to the mechanical state)
 					demands++
 					forceCompact = true
 					forceNotice = fmt.Sprintf(exigeContext, ev.TokensEntrada, alvo)
@@ -655,6 +674,20 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		forcedRequest := forceCompact
 		round, err := cli.RodarContext(ctx, system, requestHistory, schemas)
 		if err != nil {
+			if forcedRequest && dealer.ToolChoiceRejeitado(err) {
+				// The gateway refuses to FORCE a tool for this model (HTTP 400
+				// tool_choice_nao_suportado: adaptive reasoning accepts only
+				// absent/auto/none). Retrying cannot help and killing the turn
+				// loses the work: remember it, drop the demand, and let the
+				// ladder write the state mechanically (the same bounded path
+				// used when a gateway ignores tool_choice).
+				s.noForcedChoiceKey = s.forcedChoiceKey()
+				s.record("context_demand_unsupported", map[string]any{"politica": PoliticaAgente, "alvo": alvo, "motivo": oneLine(err.Error())})
+				forceCompact = false
+				forceNotice = ""
+				demands = maxDemands
+				continue
+			}
 			if contextOverflow(err) && !reactiveCompacted {
 				r.Guardrail(false)
 				if !reactivePruned {
