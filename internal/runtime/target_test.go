@@ -10,7 +10,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
+	"github.com/ruanbarroso/barroso-harness/internal/store"
 )
 
 func round(id, tool, args, result string) []dealer.Mensagem {
@@ -151,18 +153,6 @@ func TestPodarStubsOldResultsAndReplays(t *testing.T) {
 	}
 }
 
-func TestValidCompactCall(t *testing.T) {
-	ok := dealer.ToolChamada{ID: "1", Nome: compactToolName, Args: `{"state":"x"}`}
-	if !validCompactCall([]dealer.ToolChamada{{Nome: "read", Args: `{}`}, ok}) {
-		t.Error("a real compact call must be accepted")
-	}
-	for _, bad := range [][]dealer.ToolChamada{nil, {{Nome: "read", Args: `{}`}}, {{Nome: compactToolName, Args: `{"state":"  "}`}}, {{Nome: compactToolName, Args: `not json`}}} {
-		if validCompactCall(bad) {
-			t.Errorf("must be rejected: %+v", bad)
-		}
-	}
-}
-
 // ── end to end ────────────────────────────────────────────────────────────
 
 type ladderServer struct {
@@ -176,10 +166,15 @@ type ladderBody struct {
 	Messages   []map[string]any `json:"messages"`
 }
 
+// forced: the request pins ONE function (a tool_choice object). The harness
+// must never send that: claude-*-5-5 rejects it with HTTP 400.
 func (b ladderBody) forced() bool {
 	m, ok := b.ToolChoice.(map[string]any)
 	return ok && m["type"] == "function"
 }
+
+// summary: the harness-initiated summarization request (tool_choice "none").
+func (b ladderBody) summary() bool { return b.ToolChoice == "none" }
 
 func (b ladderBody) text() string {
 	var sb strings.Builder
@@ -192,9 +187,20 @@ func (b ladderBody) text() string {
 	return sb.String()
 }
 
-// newLadderServer answers a forced request with a context_compact call when
-// obey is true; every other request gets plain text.
-func newLadderServer(t *testing.T, obey bool) *ladderServer {
+const ladderSummary = "Goal: finish the report. Next: send it."
+
+// How the fake gateway answers the summarization request.
+const (
+	sumOK    = "ok"    // plain text with the state
+	sumFail  = "fail"  // HTTP 400 (not retried)
+	sumEmpty = "empty" // 200 with no text
+	sumTool  = "tool"  // calls a tool although tool_choice is none
+)
+
+// newLadderServer answers the summarization request (tool_choice "none")
+// according to mode; every other request gets plain text "done". A request
+// that pins a function is answered with the BK's 400, as claude-*-5-5 does.
+func newLadderServer(t *testing.T, mode string) *ladderServer {
 	ls := &ladderServer{}
 	ls.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b ladderBody
@@ -202,17 +208,27 @@ func newLadderServer(t *testing.T, obey bool) *ladderServer {
 		ls.mu.Lock()
 		ls.bodies = append(ls.bodies, b)
 		ls.mu.Unlock()
+		if b.forced() || (b.summary() && mode == sumFail) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"tool_choice_nao_suportado","message":"only auto or none"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		emit := func(p any) {
 			j, _ := json.Marshal(p)
 			_, _ = w.Write([]byte("data: " + string(j) + "\n\n"))
 		}
-		if b.forced() && obey {
+		switch {
+		case b.summary() && mode == sumTool:
 			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{"tool_calls": []map[string]any{{
-				"index": 0, "id": "cmp1", "type": "function",
-				"function": map[string]any{"name": "context_compact", "arguments": `{"state":"Goal: finish the report. Next: send it."}`},
+				"index": 0, "id": "x1", "type": "function",
+				"function": map[string]any{"name": "context_compact", "arguments": `{"state":"ignored"}`},
 			}}}}}})
-		} else {
+		case b.summary() && mode == sumEmpty:
+		case b.summary():
+			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": ladderSummary}}}})
+		default:
 			emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "done"}}}})
 		}
 		emit(map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}})
@@ -231,47 +247,56 @@ func seedHeavy(t *testing.T, s *Session) {
 	}
 }
 
-func TestLadderRequiresCompactionOnTheWire(t *testing.T) {
-	srv := newLadderServer(t, true)
+// runHeavyTurn resumes a heavy conversation and sends one more request.
+func runHeavyTurn(t *testing.T, srv *ladderServer, id, prompt string) (*Session, config.Config, *store.Store) {
+	t.Helper()
 	st := testStore(t)
-	const id = "bh-20240101140000-lad1"
 	cfg := fakeConfig(t, srv.URL)
 	cfg.AlvoContexto = 20_000
 	seedHeavy(t, NewSessionWithStore(cfg, st, id))
-
 	s := NewSessionWithStore(cfg, st, id)
 	if err := s.Resume(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "current request: wrap up"); err != nil {
-		t.Fatal(err)
+	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), prompt); err != nil {
+		t.Fatalf("the turn must survive: %v", err)
 	}
+	return s, cfg, st
+}
+
+// Over the target after the stubs, the HARNESS runs one summarization call
+// (tool_choice "none" — what Claude Code, Codex and OpenCode do) and the next
+// request carries its answer. No request ever pins a function.
+func TestLadderSummarizesWithToolChoiceNone(t *testing.T) {
+	srv := newLadderServer(t, sumOK)
+	const id = "bh-20240101140000-lad1"
+	s, cfg, st := runHeavyTurn(t, srv, id, "current request: wrap up")
 
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	if len(srv.bodies) != 2 {
-		t.Fatalf("requests = %d; want the forced one plus the compacted one", len(srv.bodies))
+		t.Fatalf("requests = %d; want the summary plus the compacted one", len(srv.bodies))
 	}
-	first, second := srv.bodies[0], srv.bodies[1]
-	if !first.forced() {
-		t.Fatalf("the first request must force context_compact: %v", first.ToolChoice)
+	for _, b := range srv.bodies {
+		if b.forced() {
+			t.Fatalf("a request pinned a function: %v", b.ToolChoice)
+		}
 	}
-	if !strings.Contains(first.text(), "The context is over the working target") {
-		t.Fatal("the demand text must travel with the forced request")
+	sum, second := srv.bodies[0], srv.bodies[1]
+	if !sum.summary() {
+		t.Fatalf("the first request must be the summarization (tool_choice none): %v", sum.ToolChoice)
 	}
-	if second.forced() || strings.Contains(second.text(), "The context is over the working target") {
-		t.Fatal("the demand must not outlive its request")
+	if !strings.Contains(sum.text(), "the harness is compacting it now") {
+		t.Fatal("the summarization instruction must travel with its request")
+	}
+	if second.summary() || strings.Contains(second.text(), "the harness is compacting it now") {
+		t.Fatal("the instruction must not outlive its request")
 	}
 	if len(second.Messages) > 6 {
 		t.Fatalf("compacted request still has %d messages", len(second.Messages))
 	}
-	if !strings.Contains(second.text(), "Goal: finish the report") || !strings.Contains(second.text(), "user asked: request 0") {
-		var roles []string
-		for _, m := range second.Messages {
-			c, _ := m["content"].(string)
-			roles = append(roles, fmt.Sprintf("%v:%.80q", m["role"], c[max(len(c)-80, 0):]))
-		}
-		t.Fatalf("state and facts must reach the next request: %d messages\n%s", len(second.Messages), strings.Join(roles, "\n"))
+	if !strings.Contains(second.text(), ladderSummary) || !strings.Contains(second.text(), "user asked: request 0") {
+		t.Fatalf("state and facts must reach the next request:\n%s", second.text())
 	}
 	if !strings.Contains(second.text(), "current request: wrap up") {
 		t.Fatal("the current request must survive")
@@ -280,6 +305,10 @@ func TestLadderRequiresCompactionOnTheWire(t *testing.T) {
 		if strings.HasPrefix(m.Conteudo, contextNotePrefix) {
 			t.Fatalf("a [context] notice leaked into the transcript: %q", m.Conteudo)
 		}
+	}
+	h := s.History()
+	if !isSummary(h[0].Conteudo) || h[len(h)-1].Conteudo != "done" {
+		t.Fatalf("history: %+v", h)
 	}
 
 	// The compaction is replayed by the next process, as it ran.
@@ -292,136 +321,64 @@ func TestLadderRequiresCompactionOnTheWire(t *testing.T) {
 	}
 	found := false
 	for _, e := range mustEvents(t, st, id) {
-		if e.Kind == eventCompaction && strings.Contains(e.Payload, `"mantem":`) {
+		if e.Kind == eventCompaction && strings.Contains(e.Payload, `"mantem":`) && strings.Contains(e.Payload, `"origem":"resumo"`) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("the compaction event must record `mantem` for a deterministic replay")
+		t.Fatal("the compaction event must record `mantem` and origem=resumo for a deterministic replay")
 	}
 }
 
-// A gateway that ignores tool_choice must neither end the turn on text nor
-// leave the context inflated: after maxDemands the harness compacts itself.
-func TestLadderFallsBackWhenTheGatewayIgnoresToolChoice(t *testing.T) {
-	srv := newLadderServer(t, false)
-	st := testStore(t)
-	const id = "bh-20240101140000-lad2"
-	cfg := fakeConfig(t, srv.URL)
-	cfg.AlvoContexto = 20_000
-	seedHeavy(t, NewSessionWithStore(cfg, st, id))
-
-	s := NewSessionWithStore(cfg, st, id)
-	if err := s.Resume(); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "current request"); err != nil {
-		t.Fatal(err)
-	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	forced := 0
-	for _, b := range srv.bodies {
-		if b.forced() {
-			forced++
-		}
-	}
-	if forced != maxDemands {
-		t.Fatalf("forced requests = %d; want %d", forced, maxDemands)
-	}
-	last := srv.bodies[len(srv.bodies)-1]
-	if last.forced() || len(last.Messages) > 6 {
-		t.Fatalf("the final request must be the compacted, unforced one: forced=%v messages=%d", last.forced(), len(last.Messages))
-	}
-	h := s.History()
-	if !isSummary(h[0].Conteudo) || h[len(h)-1].Conteudo != "done" {
-		t.Fatalf("history: %+v", h)
-	}
-}
-
-// claude-*-5-5 behind the BK answers a FORCED tool_choice with HTTP 400
-// tool_choice_nao_suportado (Zoe, conversation 105570). The turn must survive:
-// one rejected attempt, then the mechanical state, and never forced again.
-func TestLadderSurvivesGatewayRejectingForcedToolChoice(t *testing.T) {
-	var mu sync.Mutex
-	var bodies []ladderBody
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var b ladderBody
-		_ = json.NewDecoder(r.Body).Decode(&b)
-		mu.Lock()
-		bodies = append(bodies, b)
-		mu.Unlock()
-		if b.forced() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"tool_choice_nao_suportado","message":"\"claude-sonnet-5-5\" só aceita \"tool_choice\" ausente, \"auto\" ou \"none\": o raciocínio adaptativo não permite forçar ferramenta."}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, p := range []any{
-			map[string]any{"choices": []map[string]any{{"delta": map[string]any{"content": "done"}}}},
-			map[string]any{"choices": []map[string]any{{"delta": map[string]any{}, "finish_reason": "stop"}}},
-		} {
-			j, _ := json.Marshal(p)
-			_, _ = w.Write([]byte("data: " + string(j) + "\n\n"))
-		}
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
-	}))
-	t.Cleanup(srv.Close)
-
-	st := testStore(t)
-	const id = "bh-20240101140000-lad3"
-	cfg := fakeConfig(t, srv.URL)
-	cfg.AlvoContexto = 20_000
-	seedHeavy(t, NewSessionWithStore(cfg, st, id))
-	s := NewSessionWithStore(cfg, st, id)
-	if err := s.Resume(); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "current request"); err != nil {
-		t.Fatalf("a rejected forced tool_choice must not kill the turn: %v", err)
-	}
-	forced := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		n := 0
-		for _, b := range bodies {
-			if b.forced() {
-				n++
+// A summarization that fails (gateway error), comes back empty or calls a
+// tool anyway must not end the turn nor leave the context inflated: the
+// harness writes the state mechanically. Nothing is ever pinned.
+func TestLadderFallsBackToMechanicalStateWhenSummaryFails(t *testing.T) {
+	for _, mode := range []string{sumFail, sumEmpty, sumTool} {
+		t.Run(mode, func(t *testing.T) {
+			srv := newLadderServer(t, mode)
+			s, _, st := runHeavyTurn(t, srv, "bh-20240101140000-lad2"+mode, "current request")
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			summaries := 0
+			for _, b := range srv.bodies {
+				if b.forced() {
+					t.Fatalf("a request pinned a function: %v", b.ToolChoice)
+				}
+				if b.summary() {
+					summaries++
+				}
 			}
-		}
-		return n
-	}
-	if got := forced(); got != 1 {
-		t.Fatalf("forced requests = %d; want exactly the one the gateway rejected", got)
-	}
-	mu.Lock()
-	last := bodies[len(bodies)-1]
-	mu.Unlock()
-	if last.forced() || len(last.Messages) > 6 {
-		t.Fatalf("the final request must be compacted and unforced: forced=%v messages=%d", last.forced(), len(last.Messages))
-	}
-	h := s.History()
-	if !isSummary(h[0].Conteudo) || h[len(h)-1].Conteudo != "done" {
-		t.Fatalf("history: %+v", h)
-	}
-	if !s.forcedChoiceRejected() {
-		t.Fatal("the rejection must be remembered for this provider/model")
-	}
-
-	// Remembered: a second heavy turn goes straight to the mechanical state.
-	seedHeavy(t, s)
-	if err := s.Send(context.Background(), RendererDe(&strings.Builder{}), t.TempDir(), "again"); err != nil {
-		t.Fatal(err)
-	}
-	if got := forced(); got != 1 {
-		t.Fatalf("forced requests after the second turn = %d; want still 1", got)
+			if summaries != 1 {
+				t.Fatalf("summarization calls = %d; want exactly 1 (no retry loop)", summaries)
+			}
+			last := srv.bodies[len(srv.bodies)-1]
+			if last.summary() || len(last.Messages) > 6 {
+				t.Fatalf("the final request must be the compacted one: summary=%v messages=%d", last.summary(), len(last.Messages))
+			}
+			h := s.History()
+			if !isSummary(h[0].Conteudo) || h[len(h)-1].Conteudo != "done" {
+				t.Fatalf("history: %+v", h)
+			}
+			if strings.Contains(h[0].Conteudo, ladderSummary) {
+				t.Fatal("the mechanical state must not contain a model summary")
+			}
+			found := false
+			for _, e := range mustEvents(t, st, "bh-20240101140000-lad2"+mode) {
+				if e.Kind == eventCompaction && strings.Contains(e.Payload, `"origem":"mecanico"`) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("the compaction event must record origem=mecanico")
+			}
+		})
 	}
 }
 
 // Below the aviso step nothing happens: no extra request, no note, no prune.
 func TestLadderQuietBelowTheTarget(t *testing.T) {
-	srv := newLadderServer(t, true)
+	srv := newLadderServer(t, sumOK)
 	cfg := fakeConfig(t, srv.URL)
 	cfg.AlvoContexto = 150_000
 	s := NewSession(cfg)
@@ -430,7 +387,7 @@ func TestLadderQuietBelowTheTarget(t *testing.T) {
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if len(srv.bodies) != 1 || srv.bodies[0].forced() || strings.Contains(srv.bodies[0].text(), "working target") {
+	if len(srv.bodies) != 1 || srv.bodies[0].forced() || srv.bodies[0].summary() || strings.Contains(srv.bodies[0].text(), "working target") {
 		t.Fatalf("a small conversation must not be disturbed: %+v", srv.bodies)
 	}
 }
@@ -438,7 +395,7 @@ func TestLadderQuietBelowTheTarget(t *testing.T) {
 // Near the target the model gets a one-request advisory that never enters the
 // transcript (it would inflate every later prompt by itself).
 func TestLadderAdvisoryIsEphemeral(t *testing.T) {
-	srv := newLadderServer(t, true)
+	srv := newLadderServer(t, sumOK)
 	st := testStore(t)
 	const id = "bh-20240101140000-lad3"
 	cfg := fakeConfig(t, srv.URL)

@@ -2,7 +2,7 @@ package dealer
 
 import (
 	"encoding/json"
-	"errors"
+	"strings"
 	"testing"
 )
 
@@ -53,33 +53,32 @@ func TestForcedToolChoiceFallsBackToAuto(t *testing.T) {
 	}
 }
 
-// The BK refuses a forced tool_choice for claude-*-5-5 (adaptive reasoning)
-// with a 400 `tool_choice_nao_suportado`. The runtime must recognize it by
-// the structured code (and by the message of other gateways), and nothing else.
-func TestToolChoiceRejeitado(t *testing.T) {
-	bk := []byte(`{"error":{"type":"invalid_request_error","code":"tool_choice_nao_suportado","message":"\"claude-sonnet-5-5\" só aceita \"tool_choice\" ausente, \"auto\" ou \"none\""}}`)
-	he := &httpError{status: 400, code: upstreamErrorCode(bk), summary: resumoComCodigo(bk)}
-	if !ToolChoiceRejeitado(he) {
-		t.Fatalf("BK 400 not recognized: %v", he)
-	}
-	other := &httpError{status: 400, summary: "tool_choice is not supported with thinking enabled"}
-	if !ToolChoiceRejeitado(other) {
-		t.Fatal("generic tool_choice 400 not recognized")
-	}
-	pe := newProviderError(0, "invalid_request_error", "tool_choice unsupported for this model")
-	if !ToolChoiceRejeitado(pe) {
-		t.Fatal("stream error not recognized")
-	}
-	for _, e := range []error{
-		&httpError{status: 500, code: "tool_choice_nao_suportado", summary: "x"},
-		&httpError{status: 400, summary: "context_length_exceeded"},
-		&httpError{status: 400, summary: "invalid tools[0].function.parameters"},
-		newProviderError(0, "server_error", "boom"),
-		errors.New("tool_choice_nao_suportado"),
-		nil,
-	} {
-		if ToolChoiceRejeitado(e) {
-			t.Fatalf("false positive: %v", e)
+// The harness-initiated summarization call must carry tool_choice "none" on
+// both protocols — the one non-auto mode every provider accepts, including
+// claude-*-5-5 with adaptive reasoning — and keep the tools in the request.
+func TestSemChamadasSendsToolChoiceNone(t *testing.T) {
+	for _, proto := range []string{"chat", "responses"} {
+		c := Novo(Config{BaseURL: "https://x/v1", Model: "m", Protocol: proto}).SemChamadas()
+		b, err := c.Corpo("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, compactToolSchema)
+		if err != nil {
+			t.Fatal(err)
 		}
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		if m["tool_choice"] != "none" {
+			t.Fatalf("%s: tool_choice = %v; want none: %s", proto, m["tool_choice"], b)
+		}
+		if tl, _ := m["tools"].([]any); len(tl) == 0 || !strings.Contains(string(b), `"name":"context_compact"`) {
+			t.Fatalf("%s: tools must stay in the request: %s", proto, b)
+		}
+	}
+	// The option does not leak into the original client.
+	base := Novo(Config{BaseURL: "https://x/v1", Model: "m", Protocol: "chat"})
+	_ = base.SemChamadas()
+	b, _ := base.Corpo("sys", []Mensagem{{Role: "user", Conteudo: "hi"}}, compactToolSchema)
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	if m["tool_choice"] != "auto" {
+		t.Fatalf("base client changed: %v", m["tool_choice"])
 	}
 }

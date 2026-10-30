@@ -170,6 +170,7 @@ type Cliente struct {
 	cfg           Config
 	maxOut        int            // output cap for this request (ComTeto); 0 = MaxTokens()
 	toolChoice    string         // one named function forced for this request (ComToolChoice)
+	noToolCalls   bool           // tool_choice "none" for this request (SemChamadas)
 	aviso         AvisoRetry     // reported before each retry (ComAviso); nil = silent
 	protocolState *protocolState // shared by request-scoped copies; caches a missing Responses route
 	// conversa is the conversation identity the canonical opencode session
@@ -215,10 +216,23 @@ func (c *Cliente) ComTeto(n int) *Cliente {
 	return &c2
 }
 
+// SemChamadas returns a copy whose request carries tool_choice "none": the
+// tools stay in the request (the history may hold tool_call/tool_result pairs
+// that need their schemas, and the cached prefix stays identical) but the
+// model must answer in plain text. It is the mode of the harness-initiated
+// summarization call; unlike a FORCED tool_choice, "none" is accepted by every
+// provider, including models with adaptive reasoning (Claude Opus/Sonnet 5.5).
+func (c *Cliente) SemChamadas() *Cliente {
+	c2 := *c
+	c2.noToolCalls = true
+	return &c2
+}
+
 // ComToolChoice returns a copy that asks the provider to call exactly this
 // named function in this request. An empty name keeps the normal "auto" mode.
-// Used only after a working-target compaction demand; the model remains free
-// on every other round.
+// Some providers reject a forced tool_choice (see ToolChoiceRejeitado), so the
+// runtime no longer uses it for compaction; it is kept for callers that know
+// their model accepts it.
 func (c *Cliente) ComToolChoice(name string) *Cliente {
 	c2 := *c
 	c2.toolChoice = strings.TrimSpace(name)
@@ -400,6 +414,9 @@ func (c *Cliente) corpoChat(system string, msgs []Mensagem, tools []map[string]a
 // one named function forced for a context-compaction request. A missing name
 // falls back to auto rather than emitting a reference to an absent tool.
 func (c *Cliente) escolhaChat(wireTools []any) any {
+	if c.noToolCalls {
+		return "none"
+	}
 	name := c.toolChoice
 	if name == "" {
 		return "auto"

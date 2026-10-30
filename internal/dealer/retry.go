@@ -416,44 +416,6 @@ func noEligibleUpstream(err error) bool {
 	return false
 }
 
-// ToolChoiceRejeitado reports whether err is the provider (or the BK gateway)
-// refusing a FORCED tool_choice: HTTP 400 with code `tool_choice_nao_suportado`
-// (claude-opus/sonnet-5-5 with adaptive reasoning accept only absent, "auto" or
-// "none") or an equivalent "tool_choice ... not supported" invalid request.
-// The request is deterministic: retrying it unchanged can never succeed, the
-// caller must stop forcing the tool for this provider/model.
-func ToolChoiceRejeitado(err error) bool {
-	var he *httpError
-	if errors.As(err, &he) {
-		if he.status != http.StatusBadRequest && he.status != http.StatusUnprocessableEntity {
-			return false
-		}
-		return toolChoiceMarker(he.code + " " + he.summary)
-	}
-	var pe *providerError
-	if errors.As(err, &pe) {
-		return toolChoiceMarker(pe.kind + " " + pe.summary)
-	}
-	return false
-}
-
-func toolChoiceMarker(s string) bool {
-	s = strings.ToLower(s)
-	if strings.Contains(s, "tool_choice_nao_suportado") || strings.Contains(s, "tool_choice_not_supported") ||
-		strings.Contains(s, "unsupported_tool_choice") {
-		return true
-	}
-	if !strings.Contains(s, "tool_choice") {
-		return false
-	}
-	for _, m := range []string{"só aceita", "nao suporta", "não suporta", "não é suportado", "not supported", "unsupported", "does not support", "doesn't support", "must be auto", "only supports", "only accepts"} {
-		if strings.Contains(s, m) {
-			return true
-		}
-	}
-	return false
-}
-
 // resumoComCodigo is errorSummary plus the error code (or type) of an
 // OpenAI-style JSON body, e.g. "... (context_length_exceeded)": the code is
 // what tells overflow, quota and invalid requests apart.

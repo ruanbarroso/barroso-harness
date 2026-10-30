@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -29,8 +30,11 @@ import (
 //     deterministic, the recent rounds stay verbatim, and the stub carries the
 //     arguments so the model can re-issue the exact call;
 //  2. tell the model, once per turn, to compact at its next milestone;
-//  3. over the target after the stubs: REQUIRE context_compact (twice);
-//  4. the model did not comply: the harness writes the state mechanically.
+//  3. over the target after the stubs: the harness runs a summarization call
+//     (plain text, tool_choice "none", the pattern of Claude Code, Codex and
+//     OpenCode — a forced tool is rejected by models with adaptive reasoning);
+//  4. that call failed or came back unusable: the harness writes the state
+//     mechanically.
 //
 // Hysteresis matters: one batch of stubs buys many rounds of a stable prefix
 // (the provider's cache lives until the prefix changes), so the policy never
@@ -46,21 +50,26 @@ const contextNotePrefix = "[context] "
 // the freshest evidence; everything older is the model's state.
 const compactKeepUnits = 3
 
-// maxDemands is how many times the model is REQUIRED to compact before the
-// harness writes the state itself.
-const maxDemands = 2
-
 // avisoContext asks the model to compact at its next milestone.
 const avisoContext = contextNotePrefix + "This conversation's context is at %d tokens, near the %d-token working target. " +
 	"At your next natural milestone — a unit of work just finished (root cause found, change made and tested, exploration done), " +
 	"or right before your final answer — call context_compact with your working state, before you start the next step. " +
 	"Do not wait for the context to fill up, and do not call it halfway through a step. Whatever you leave out stays recoverable through session_search / session_retrieve.\n"
 
-// exigeContext demands the working state before anything else happens.
-const exigeContext = contextNotePrefix + "The context is over the working target (%d tokens against %d). " +
-	"Your next action MUST be context_compact: write the working state that lets you continue without the earlier history " +
-	"(goal, decisions, discovered facts with paths and values, what was already changed, the exact next step). " +
-	"Do not run any other tool first.\n"
+// resumoContext is the instruction of the harness-initiated summarization
+// call. It is appended to the request only (never to the transcript), as the
+// last user message, so the cached prefix (system, tools, history) is reused.
+const resumoContext = contextNotePrefix + "The context is over the working target (%d tokens against %d), so the harness is compacting it now. " +
+	"Do NOT call any tool; answer with plain text only. Write the working state that lets you continue without the earlier history, " +
+	"as a handoff to yourself, with these sections: " +
+	"Goal (what the user wants, in their terms); " +
+	"Constraints (the user's rules, preferences and corrections, verbatim when short); " +
+	"Decisions (what was decided and WHY, including approaches rejected); " +
+	"Facts (paths with line numbers, signatures, commands, ids, values, exact error messages — whatever you would otherwise re-read); " +
+	"Done (what changed and how it was verified); " +
+	"Open (failing tests, unresolved errors, things to check); " +
+	"Next (the exact next action). " +
+	"Dense and concrete beats long: no narration, no pleasantries, no preamble. The harness already keeps the user's requests and the list of files touched.\n"
 
 const factsHeader = "## Working facts kept by the harness"
 
@@ -349,22 +358,6 @@ func applyPrunedResults(h []dealer.Mensagem, items []prunedResult) []dealer.Mens
 	return h
 }
 
-// validCompactCall reports whether a forced round really asked for the
-// compaction: a context_compact call with a non-empty state. A gateway that
-// ignores tool_choice may answer with text or another tool; that response must
-// never be accepted as the compaction.
-func validCompactCall(calls []dealer.ToolChamada) bool {
-	for _, c := range calls {
-		if c.Nome != compactToolName {
-			continue
-		}
-		if state, err := readCompactState(json.RawMessage(c.Args)); err == nil && strings.TrimSpace(state) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 // argsDaChamada finds the arguments of the call that produced a result, so the
 // stub can say exactly what to re-issue.
 func argsDaChamada(h []dealer.Mensagem, toolID string) string {
@@ -387,4 +380,68 @@ func argsDaChamada(h []dealer.Mensagem, toolID string) string {
 func stubText(h []dealer.Mensagem, i int) string {
 	return fmt.Sprintf("(earlier result of %s%s compacted by the context policy; call it again if you still need the content)",
 		h[i].ToolName, argsDaChamada(h, h[i].ToolID))
+}
+
+// summaryOutcome is what a summarization call returns: the state text and the
+// tokens it spent (the turn footer counts them).
+type summaryOutcome struct {
+	text           string
+	prompt, output int
+}
+
+// summarize runs the harness-initiated summarization call: the same system
+// prompt, tools and history as the next request (so the provider's prefix
+// cache is reused) plus an instruction as the last user message, with
+// tool_choice "none". Nothing of the call (instruction or answer) enters the
+// transcript; the caller applies the text through compactTurn. Any failure
+// returns an error and the caller falls back to the mechanical state.
+func (s *Session) summarize(ctx context.Context, r Renderer, system string, working []dealer.Mensagem, schemas []map[string]any, tokens, alvo, cycle int) (summaryOutcome, error) {
+	var out summaryOutcome
+	req := append(append([]dealer.Mensagem(nil), working...), dealer.Mensagem{Role: "user", Conteudo: fmt.Sprintf(resumoContext, tokens, alvo)})
+	cli := s.dealer.ComConversa(s.sessionID).SemChamadas()
+	if s.config.Janela > 0 {
+		cli = cli.ComTeto(max(1024, min(cli.MaxTokens(), s.config.Janela-tokens)))
+	}
+	if rr, ok := r.(RendererRetry); ok {
+		cli = cli.ComAviso(rr.Retentando)
+	}
+	if rd, ok := r.(RendererDetalhado); ok {
+		rd.Pensando()
+	}
+	round, err := cli.RodarContext(ctx, system, req, schemas)
+	if err != nil {
+		return out, err
+	}
+	if round.Usage != nil {
+		out.prompt, out.output = max(round.Usage.PromptTokens, 0), round.Usage.OutputTokens
+		s.addCost(round.Usage)
+		if rc, ok := r.(RendererCusto); ok {
+			if usd, tem := s.Custo(); tem {
+				rc.Custo(usd)
+			}
+		}
+		s.record("round", map[string]any{
+			"cycle":         cycle,
+			"tipo":          "resumo",
+			"prompt_tokens": round.Usage.PromptTokens,
+			"cached_tokens": round.Usage.CachedTokens,
+			"output_tokens": round.Usage.OutputTokens,
+			"ttft_ms":       round.TTFT.Milliseconds(),
+			"duration_ms":   round.Dur.Milliseconds(),
+			"tools_bytes":   jsonLen(schemas),
+			"system_bytes":  len(system),
+		})
+	}
+	switch {
+	case round.Cortada:
+		return out, fmt.Errorf("summary cut at the output limit")
+	case len(round.Tools) > 0:
+		return out, fmt.Errorf("summary answered with a tool call (%s) despite tool_choice none", round.Tools[0].Nome)
+	}
+	text := strings.TrimSpace(round.Texto)
+	if text == "" {
+		return out, fmt.Errorf("empty summary (finish %q)", round.Fim)
+	}
+	out.text = clip(text, maxSummary)
+	return out, nil
 }

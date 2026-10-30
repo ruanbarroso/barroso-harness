@@ -99,6 +99,9 @@ func toolResponses(t map[string]any) respTool {
 // one named function forced for a context-compaction request. A missing name
 // falls back to auto rather than emitting a reference to an absent tool.
 func (c *Cliente) escolhaResponses(tools []respTool) any {
+	if c.noToolCalls {
+		return "none"
+	}
 	name := c.toolChoice
 	if name == "" {
 		return "auto"
