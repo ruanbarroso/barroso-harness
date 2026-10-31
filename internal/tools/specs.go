@@ -99,7 +99,10 @@ func specTerminalRun() Spec {
 			"Commands accept an optional timeout; a foreground command still running after ~60 s is moved to the " +
 			"background and you get its jobID and output so far (wait/read with shell_output, stop with shell_kill). " +
 			"A foreground command that prints nothing for 5 minutes is treated as stuck and killed. " +
-			"For servers/watchers pass background:true (they are never killed for silence).",
+			"For servers/watchers pass background:true (they are never killed for silence). " +
+			"You are TOLD when a background job ends: a new turn starts with its exit code and output, so do not poll or block on it. " +
+			"To wait for something (e.g. a reply from someone) start a background timer (`" + sleepHint() + "`), tell the user what you wait for and until when, and end your turn; " +
+			"you are woken when the timer ends. Keep a retry limit. Never use a sub-agent just to wait.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -135,13 +138,14 @@ func specTerminalRun() Spec {
 			if c.Background {
 				sink = nil // the turn moves on; nobody is watching live
 			}
-			j, err := startJob(c.Command, dir, sink)
+			j, err := startJob(c.Command, dir, sink, jobSetFrom(ctx))
 			if err != nil {
 				return fmt.Sprintf("exit_code: -1\nstart failed: %v", err), nil
 			}
 			if c.Background {
 				j.background = true
 				register(j)
+				j.markBackground()
 				return j.status("started in the background"), nil
 			}
 			// An explicit timeout is the model asking for a hard bound: honor it
@@ -155,7 +159,8 @@ func specTerminalOutput() Spec {
 	return Spec{
 		Name: "shell_output",
 		Description: "Waits for a background shell job and returns its new output, or its final exit_code when it ended. " +
-			"Without jobID lists the jobs. Waits up to waitSecs (default 60, max 600) — prefer one long wait over many short polls.",
+			"Without jobID lists the jobs. Waits up to waitSecs (default 60, max 600) — prefer one long wait over many short polls. " +
+			"You do not need it to learn that a background job ended: you are notified with a new turn.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -224,6 +229,14 @@ func shellNote() string {
 			"or `powershell -NoProfile -Command \"...\"` for PowerShell; POSIX tools like grep/sed/ls may not exist."
 	}
 	return "The command runs via `bash -c`."
+}
+
+// sleepHint is an example of a timer command for this platform.
+func sleepHint() string {
+	if runtime.GOOS == "windows" {
+		return "powershell -NoProfile -Command Start-Sleep 600"
+	}
+	return "sleep 600"
 }
 
 // ShellName is the shell the shell tool uses on this platform, for the system prompt.

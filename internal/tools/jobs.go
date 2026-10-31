@@ -179,6 +179,22 @@ type job struct {
 	note       string // why it ended, when not on its own (timeout, killed)
 	background bool   // started with background:true — no inactivity kill
 	killOnce   sync.Once
+
+	// Notice of the end (jobnotice.go). set is fixed before the process starts.
+	set      *JobSet
+	end      time.Time
+	mu       sync.Mutex // guards bg, consumed, notified
+	bg       bool       // runs in the background: the agent is told when it ends
+	consumed bool       // the model already read the result
+	notified bool
+}
+
+// code is the exit code as the model sees it.
+func (j *job) code() int {
+	if j.note != "" && j.exit < 0 {
+		return 124
+	}
+	return j.exit
 }
 
 var (
@@ -190,7 +206,7 @@ var (
 // startJob spawns command in dir. The process is NOT tied to the tool ctx:
 // the caller decides when to kill it (cancellation, timeout, inactivity), so a
 // job moved to the background survives the end of the call.
-func startJob(command, dir string, sink func(string)) (*job, error) {
+func startJob(command, dir string, sink func(string), set *JobSet) (*job, error) {
 	cmd := terminalCmd(context.Background(), command)
 	cmd.Dir = dir
 	treeAttrs(cmd)
@@ -200,7 +216,7 @@ func startJob(command, dir string, sink func(string)) (*job, error) {
 	j := &job{
 		id:      "job-" + strconv.FormatInt(jobSeq.Add(1), 10),
 		command: command, cmd: cmd, out: out, start: time.Now(),
-		done: make(chan struct{}), exit: -1,
+		done: make(chan struct{}), exit: -1, set: set,
 	}
 	if err := cmd.Start(); err != nil {
 		out.render(true)
@@ -211,7 +227,9 @@ func startJob(command, dir string, sink func(string)) (*job, error) {
 		if cmd.ProcessState != nil {
 			j.exit = cmd.ProcessState.ExitCode()
 		}
+		j.end = time.Now()
 		close(j.done)
+		j.maybeNotify()
 	}()
 	return j, nil
 }
@@ -316,6 +334,7 @@ func runForeground(ctx context.Context, j *job, timeout time.Duration, auto bool
 			}
 			if auto && autoBackground > 0 && time.Since(j.start) >= autoBackground {
 				register(j)
+				j.markBackground()
 				go watchInactive(j)
 				return j.status(fmt.Sprintf("still running after %s: moved to the background so the turn is not blocked; it keeps running", autoBackground))
 			}
@@ -357,6 +376,7 @@ func waitJob(ctx context.Context, j *job, wait time.Duration) string {
 		jobsMu.Lock()
 		delete(jobs, j.id)
 		jobsMu.Unlock()
+		j.consume()
 		rest := j.out.unread()
 		res := j.result()
 		if len(res) > outputCap { // already shown in pieces: give the end + file

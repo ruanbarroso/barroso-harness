@@ -24,6 +24,7 @@ import (
 	"github.com/ruanbarroso/barroso-harness/internal/pricing"
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
 	"github.com/ruanbarroso/barroso-harness/internal/subagent"
+	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
 // Conjunto is what the session gained: the already-injected specs and the
@@ -36,6 +37,16 @@ import (
 type Conjunto struct {
 	manager    *subagent.Gerente // always present when Montar went through a real session
 	mcpManager *mcpManager       // MCP servers (connected or not) and their tools
+	jobs       *tools.JobSet     // background shell jobs of the session
+}
+
+// Jobs returns the set that reports background shell jobs ending (nil in an
+// empty Conjunto).
+func (c *Conjunto) Jobs() *tools.JobSet {
+	if c == nil {
+		return nil
+	}
+	return c.jobs
 }
 
 // Gerente returns the sibling-task manager (nil only in an empty Conjunto —
@@ -118,7 +129,13 @@ func Montar(ctx context.Context, cfg config.Config, sess *runtime.Session, cwd s
 		sess.DefinirPrecos(precos)
 	}
 
-	return &Conjunto{manager: manager, mcpManager: mm}, warnings
+	// ── background shell jobs ──────────────────────────────────────────────
+	// The shell tool reports a background job's end to this set (found in the
+	// tool ctx); the host turns it into a notice turn.
+	js := tools.NewJobSet()
+	sess.DefinirJobs(js)
+
+	return &Conjunto{manager: manager, mcpManager: mm, jobs: js}, warnings
 }
 
 // Fechar shuts down the MCP servers. Sub-agents have no shutdown: the registry

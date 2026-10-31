@@ -484,6 +484,10 @@ func repl(io IO, cfg *config.Config) {
 	if g := wired.Gerente(); g != nil && io.inject != nil {
 		g.AoTerminar(func() { io.inject(subagentsLine) })
 	}
+	// Background shell jobs wake the REPL the same way.
+	if js := wired.Jobs(); js != nil && io.inject != nil {
+		js.AoTerminar(func() { io.inject(subagentsLine) })
+	}
 	// The full screen's dialogs read the catalog, sessions and sub-agents
 	// through this handle; it is refreshed before every prompt.
 	var src *dialogSource
@@ -543,11 +547,21 @@ func repl(io IO, cfg *config.Config) {
 		// user having to ask.
 		subNotice := ""
 		if strings.TrimSpace(line) == subagentsLine {
-			ts := wired.Gerente().Terminadas()
-			if len(ts) == 0 {
-				continue // already delivered (subagent_result or an earlier notice)
+			var notices []string
+			if g := wired.Gerente(); g != nil {
+				if ts := g.Terminadas(); len(ts) > 0 {
+					notices = append(notices, subagent.AvisoTerminadas(ts, g.Ativas()))
+				}
 			}
-			subNotice = subagent.AvisoTerminadas(ts, wired.Gerente().Ativas())
+			if js := wired.Jobs(); js != nil {
+				if fins := js.Terminadas(); len(fins) > 0 {
+					notices = append(notices, tools.AvisoJobs(fins, js.Ativas()))
+				}
+			}
+			if len(notices) == 0 {
+				continue // already delivered (subagent_result, shell_output or an earlier notice)
+			}
+			subNotice = strings.Join(notices, "\n")
 			line = subNotice
 		}
 		parts := strings.SplitN(strings.TrimSpace(line), " ", 2)

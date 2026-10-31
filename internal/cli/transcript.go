@@ -776,12 +776,20 @@ func (t *screen) placeTool(it *item) {
 
 var reSubDone = regexp.MustCompile(`^## (\S+) (\S+) \(([^)]*)\)`)
 
+// reJobDone matches a background job's row in a "[shell]" notice.
+var reJobDone = regexp.MustCompile(`^## (job-\d+) exit (-?\d+) \(([^)]*)\)`)
+
 // AvisoSubagentes draws one row per finished sub-agent of the notice.
 func (t *screen) AvisoSubagentes(text string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := 0
 	for _, l := range strings.Split(text, "\n") {
+		if m := reJobDone.FindStringSubmatch(l); m != nil {
+			t.appendLocked("", grayf("background job "+m[1]+" finished (exit "+m[2]+", "+m[3]+")"))
+			n++
+			continue
+		}
 		m := reSubDone.FindStringSubmatch(l)
 		if m == nil {
 			continue

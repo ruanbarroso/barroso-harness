@@ -303,7 +303,7 @@ func (s *Store) PrimeiraFala(id string) string {
 		    AND payload_json NOT LIKE '%[working state%'
 		    AND payload_json NOT LIKE '%[output limit]%'
 		    AND payload_json NOT LIKE '%[tool call as text]%'
-		    AND payload_json NOT LIKE '%[subagents]%'
+		    AND payload_json NOT LIKE '%[subagents]%' AND payload_json NOT LIKE '%[shell] Background jobs finished%'
 		  ORDER BY seq LIMIT 1`, id).Scan(&body)
 	if err != nil {
 		return ""

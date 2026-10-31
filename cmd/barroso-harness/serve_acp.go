@@ -131,20 +131,35 @@ func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) {
 		return
 	}
 	g := set.Gerente()
-	if g == nil {
+	js := set.Jobs()
+	if g == nil && js == nil {
 		return
 	}
+	// One fetch for both sources: the ACP agent keeps a single fetch per
+	// session, so sub-agent and background-job notices share it.
 	fetch := func() (string, bool) {
-		ts := g.Terminadas()
-		if len(ts) == 0 {
+		var parts []string
+		if g != nil {
+			if ts := g.Terminadas(); len(ts) > 0 {
+				parts = append(parts, subagent.AvisoTerminadas(ts, g.Ativas()))
+			}
+		}
+		if fins := js.Terminadas(); len(fins) > 0 {
+			parts = append(parts, tools.AvisoJobs(fins, js.Ativas()))
+		}
+		if len(parts) == 0 {
 			return "", false
 		}
-		return subagent.AvisoTerminadas(ts, g.Ativas()), true
+		return strings.Join(parts, "\n"), true
 	}
-	g.AoAtividade(func(taskID string, event subagent.Evento) {
-		ag.AvisarAtividadeSubagente(id, taskID, event)
-	})
-	g.AoTerminar(func() { ag.AvisarSubagentes(id, fetch) })
+	wake := func() { ag.AvisarSubagentes(id, fetch) }
+	if g != nil {
+		g.AoAtividade(func(taskID string, event subagent.Evento) {
+			ag.AvisarAtividadeSubagente(id, taskID, event)
+		})
+		g.AoTerminar(wake)
+	}
+	js.AoTerminar(wake)
 }
 
 // loadACPSession reopens a session from sessions.db for session/load: the

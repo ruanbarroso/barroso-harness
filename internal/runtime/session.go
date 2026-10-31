@@ -49,6 +49,10 @@ type Session struct {
 	muExtras sync.Mutex
 	injected []tools.Spec
 
+	// jobs hears about this session's background shell jobs ending (set by the
+	// wiring; nil = no notice). Child sessions do not get one.
+	jobs *tools.JobSet
+
 	// inbox holds messages the user sent while a turn runs (steer). They are
 	// delivered at the next safe boundary — after a tool round, before the next
 	// request — in arrival order, without cancelling the turn. Messages still
@@ -233,6 +237,10 @@ func (s *Session) zerarCusto() {
 	s.temPreco = false
 	s.muPreco.Unlock()
 }
+
+// DefinirJobs installs the set that tools find in their ctx to report
+// background shell jobs. Call before the first turn.
+func (s *Session) DefinirJobs(js *tools.JobSet) { s.jobs = js }
 
 // DefinirPrecos installs the optional price table. An empty table means bh
 // never computes a money cost — tokens stay the only metric. Called by the
@@ -1022,6 +1030,9 @@ func (s *Session) runRound(ctx context.Context, r Renderer, list []tools.Spec, c
 		call := calls[i]
 		start := time.Now()
 		cctx := ctx
+		if s.jobs != nil {
+			cctx = tools.WithJobSet(cctx, s.jobs)
+		}
 		if live {
 			id := liveID(i)
 			cctx = tools.WithOutput(ctx, func(chunk string) { av.ToolSaida(id, chunk) })
