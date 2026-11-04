@@ -483,6 +483,11 @@ func repl(io IO, cfg *config.Config) {
 	defer func() { _ = wired.Fechar(); tools.KillJobs() }()
 	if g := wired.Gerente(); g != nil && io.inject != nil {
 		g.AoTerminar(func() { io.inject(subagentsLine) })
+		// Sub-agents restored from the session log (died with a previous
+		// process, or never delivered) are reported as soon as the REPL runs.
+		if g.Pendentes() > 0 {
+			go io.inject(subagentsLine)
+		}
 	}
 	// Background shell jobs wake the REPL the same way.
 	if js := wired.Jobs(); js != nil && io.inject != nil {

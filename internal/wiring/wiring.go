@@ -119,6 +119,21 @@ func Montar(ctx context.Context, cfg config.Config, sess *runtime.Session, cwd s
 	// Bind to the long-lived ctx BEFORE the first Spawn: tasks derive their
 	// child context from here, and the turn ctx dies at the end of the line.
 	manager.Vincular(ctx)
+	// Lifecycle records go to the session log, so a bh process that dies with
+	// sub-agents running leaves a trace. On a reopened session (session/load,
+	// /resume) Restaurar turns what was running into "interrupted" and what
+	// was never delivered into a pending notice for the parent.
+	if sess.Persistente() {
+		regs := sess.EventosDeTipo(subagent.EventoTarefa, subagent.EventoEntregue)
+		manager.Persistir(sess.RegistrarEvento)
+		if len(regs) > 0 {
+			rs := make([]subagent.Registro, len(regs))
+			for i, e := range regs {
+				rs[i] = subagent.Registro{Kind: e.Kind, Payload: e.Payload}
+			}
+			manager.Restaurar(rs)
+		}
+	}
 	sess.Injetar(subagent.Especificacoes(manager, cfg)...)
 
 	// ── prices (optional) ─────────────────────────────────────────────────

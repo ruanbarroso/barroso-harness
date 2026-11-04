@@ -105,6 +105,11 @@ type Agente struct {
 	Fabrica func(config.Config) (Turno, string)
 	// Carregar reopens a recorded session (session/load). nil = loadSession false.
 	Carregar Carregador
+	// AposCarregar, when set, runs once a session reopened by session/load is
+	// registered (and, if it was already live, again on each load). The host
+	// uses it to deliver sub-agent results that were pending when the previous
+	// process died: AvisarSubagentes ignores sessions that are not registered.
+	AposCarregar func(sessionID string)
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -389,7 +394,13 @@ func (a *Agente) loadSession(w io.Writer, req Request) error {
 	}
 	a.logf("acp: session %s loaded in %s", p.SessionID, cwd)
 	loaded, _ := a.lookupSession(p.SessionID)
-	return a.respond(w, NovaResposta(req.ID, a.sessionState(loaded)))
+	err := a.respond(w, NovaResposta(req.ID, a.sessionState(loaded)))
+	// After the response, so the client already knows the session when a
+	// pending notice (sub-agents that died with the old process) starts a turn.
+	if err == nil && a.AposCarregar != nil {
+		a.AposCarregar(p.SessionID)
+	}
+	return err
 }
 
 // replay emits the transcript as notifications, in order. A tool_call and its

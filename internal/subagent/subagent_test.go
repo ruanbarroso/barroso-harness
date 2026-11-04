@@ -428,7 +428,7 @@ func TestResultUnknownIdAndInputErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status without tasks should not fail: %v", err)
 	}
-	if !strings.Contains(out, "no tasks") {
+	if !strings.Contains(out, "no sub-agents") {
 		t.Fatalf("unexpected empty status: %q", out)
 	}
 }
@@ -493,12 +493,11 @@ func hasBuiltin(v reqView, name string) bool {
 	return false
 }
 
-// The model only gets the launcher ("task" here, "subagent" by default):
-// without status/result it has no way to keep
-// polling in a loop, and results arrive through the automatic notice.
-func TestModelOnlyGetsSpawn(t *testing.T) {
+// The model gets the launcher and the rate-limited status, but no result
+// tool: results arrive through the automatic notice.
+func TestModelGetsSpawnAndStatusOnly(t *testing.T) {
 	specs := Especificacoes(Novo(Config{Nome: "task"}), config.Config{})
-	if len(specs) != 1 || specs[0].Name != "task" {
+	if len(specs) != 2 || specs[0].Name != "task" || specs[1].Name != "task_status" {
 		t.Fatalf("model tools = %v", specs)
 	}
 }

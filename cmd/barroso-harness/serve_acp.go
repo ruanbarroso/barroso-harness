@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ruanbarroso/barroso-harness/internal/acp"
 	"github.com/ruanbarroso/barroso-harness/internal/config"
@@ -49,7 +50,15 @@ func serveACP() {
 	var open []*wiring.Conjunto
 	// ag is assigned below; the closures only run after Handle starts.
 	var ag *acp.Agente
-	notices := func(id string, set *wiring.Conjunto) { wireSubagentNotices(ag, id, set) }
+	var wakeMu sync.Mutex
+	wakes := map[string]func(){}
+	notices := func(id string, set *wiring.Conjunto) {
+		if w := wireSubagentNotices(ag, id, set); w != nil {
+			wakeMu.Lock()
+			wakes[id] = w
+			wakeMu.Unlock()
+		}
+	}
 	factory := func(c config.Config) (acp.Turno, string) {
 		return newACPSession(c, st, cwd, &open, notices)
 	}
@@ -81,6 +90,17 @@ func serveACP() {
 	if st != nil {
 		ag.Carregar = func(c config.Config, id string) (acp.Turno, error) {
 			return loadACPSession(c, st, cwd, id, &open, notices)
+		}
+		// Sub-agents of the reopened session that died with the previous
+		// process (or whose result was never delivered) are reported to the
+		// parent now that the session is registered.
+		ag.AposCarregar = func(id string) {
+			wakeMu.Lock()
+			w := wakes[id]
+			wakeMu.Unlock()
+			if w != nil {
+				w()
+			}
 		}
 	}
 	if err := ag.Handle(nil, os.Stdin, os.Stdout); err != nil {
@@ -126,14 +146,14 @@ func newACPSession(cfg config.Config, st *store.Store, cwd string, open *[]*wiri
 
 // wireSubagentNotices connects the session's sub-agent manager to the ACP
 // agent: each batch that finishes becomes a notice turn of that session.
-func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) {
+func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) func() {
 	if ag == nil || set == nil {
-		return
+		return nil
 	}
 	g := set.Gerente()
 	js := set.Jobs()
 	if g == nil && js == nil {
-		return
+		return nil
 	}
 	// One fetch for both sources: the ACP agent keeps a single fetch per
 	// session, so sub-agent and background-job notices share it.
@@ -160,6 +180,7 @@ func wireSubagentNotices(ag *acp.Agente, id string, set *wiring.Conjunto) {
 		g.AoTerminar(wake)
 	}
 	js.AoTerminar(wake)
+	return wake
 }
 
 // loadACPSession reopens a session from sessions.db for session/load: the

@@ -337,3 +337,32 @@ func (s *Session) Retrieve(seq int) (store.Event, error) {
 	e.Payload = full
 	return *e, nil
 }
+
+// RegistrarEvento appends a host-defined record (e.g. sub-agent lifecycle) to
+// the session log. No-op without persistence. Records of unknown kinds are
+// ignored when the transcript is rebuilt.
+func (s *Session) RegistrarEvento(kind string, payload map[string]any) {
+	s.record(kind, payload)
+}
+
+// EventosDeTipo returns the raw payloads of the session's events whose kind is
+// in kinds, in log order.
+func (s *Session) EventosDeTipo(kinds ...string) []store.Event {
+	if !s.Persistente() {
+		return nil
+	}
+	events, err := s.store.ListEvents(s.sessionID, 0, 0)
+	if err != nil {
+		return nil
+	}
+	var out []store.Event
+	for _, e := range events {
+		for _, k := range kinds {
+			if e.Kind == k {
+				out = append(out, e)
+				break
+			}
+		}
+	}
+	return out
+}

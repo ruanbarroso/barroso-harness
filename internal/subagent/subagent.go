@@ -268,6 +268,13 @@ type Gerente struct {
 	onActivity func(taskID string, event Evento)
 	delivered  map[string]bool // tasks already delivered by Terminadas
 
+	persist func(kind string, payload map[string]any) // lifecycle records; see persist.go
+	now     func() time.Time                          // test seam; nil = time.Now
+
+	// lastStatus is when subagent_status last gave the full report; see
+	// statusSpec (anti-polling guard).
+	lastStatus time.Time
+
 	// spawnTurn is the ctx of the turn that already launched sub-agents: a
 	// turn launches only once (see spawnSpec).
 	spawnTurn context.Context
@@ -325,14 +332,17 @@ func (g *Gerente) Terminadas() []Tarefa {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out []Tarefa
+	var ids []string
 	for _, id := range g.order {
 		t := g.tasks[id]
 		if t == nil || g.delivered[id] || t.TerminadaEm.IsZero() {
 			continue
 		}
 		g.delivered[id] = true
+		ids = append(ids, id)
 		out = append(out, copyTask(t))
 	}
+	g.persistDelivered(ids)
 	return out
 }
 
@@ -340,8 +350,9 @@ func (g *Gerente) Terminadas() []Tarefa {
 // automatic notice for that task need not repeat the text.
 func (g *Gerente) markDelivered(id string) {
 	g.mu.Lock()
-	if t := g.tasks[id]; t != nil && !t.TerminadaEm.IsZero() {
+	if t := g.tasks[id]; t != nil && !t.TerminadaEm.IsZero() && !g.delivered[id] {
 		g.delivered[id] = true
+		g.persistDelivered([]string{id})
 	}
 	g.mu.Unlock()
 }
@@ -533,20 +544,25 @@ func (g *Gerente) Spawn(ctx context.Context, request string) (string, error) {
 	g.tasks[t.ID] = t
 	g.order = append(g.order, t.ID)
 	id := t.ID
+	// Recorded as soon as it exists: if the process dies while it runs, the
+	// log still says this task was launched (see Restaurar).
+	t.Estado = Running
+	g.persistTask(t, true)
+	t.Estado = Queued
 	g.mu.Unlock()
 
 	if ctx.Err() != nil {
 		// Parent already dead: the task is born cancelled instead of
 		// pretending to run.
 		g.mu.Lock()
-		t.finish(Cancelled, "parent context was already done")
+		g.fin(t, Cancelled, "parent context was already done")
 		g.mu.Unlock()
 		g.notify()
 		return id, nil
 	}
 	if !cfg.Pronta() {
 		g.mu.Lock()
-		t.finish(Failed, "incomplete config: "+strings.Join(cfg.Faltas(), ", "))
+		g.fin(t, Failed, "incomplete config: "+strings.Join(cfg.Faltas(), ", "))
 		g.mu.Unlock()
 		g.notify()
 		return id, nil
@@ -583,7 +599,7 @@ func (g *Gerente) run(ctx context.Context, t *Tarefa, cfg config.Config, cwd str
 		// It becomes a task failure.
 		if r := recover(); r != nil {
 			g.mu.Lock()
-			t.finish(Failed, fmt.Sprintf("panic: %v", r))
+			g.fin(t, Failed, fmt.Sprintf("panic: %v", r))
 			g.mu.Unlock()
 		}
 		g.mu.Lock()
@@ -601,7 +617,7 @@ func (g *Gerente) run(ctx context.Context, t *Tarefa, cfg config.Config, cwd str
 		// No child session (unexpected state): fail instead of panicking;
 		// the defer above notifies the parent.
 		g.mu.Lock()
-		t.finish(Failed, "child session not initialized")
+		g.fin(t, Failed, "child session not initialized")
 		g.mu.Unlock()
 		return
 	}
@@ -621,11 +637,11 @@ func (g *Gerente) run(ctx context.Context, t *Tarefa, cfg config.Config, cwd str
 	g.mu.Lock()
 	switch {
 	case err == nil:
-		t.finish(Completed, "")
+		g.fin(t, Completed, "")
 	case childCtx.Err() != nil || ctx.Err() != nil || errors.Is(err, context.Canceled):
-		t.finish(Cancelled, "")
+		g.fin(t, Cancelled, "")
 	default:
-		t.finish(Failed, oneLine(err))
+		g.fin(t, Failed, oneLine(err))
 	}
 	g.mu.Unlock()
 }
@@ -642,7 +658,7 @@ func (g *Gerente) Cancelar(id string) bool {
 	}
 	switch t.Estado {
 	case Queued:
-		t.finish(Cancelled, "cancelled before starting")
+		g.fin(t, Cancelled, "cancelled before starting")
 		go g.notify()
 		return true
 	case Running:

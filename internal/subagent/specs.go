@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/tools"
@@ -20,12 +21,13 @@ import (
 // asks for the rest some other way (or refines the request).
 const TetoResultado = 16 << 10
 
-// Especificacoes returns the model's delegation tool: <prefix>_spawn
-// {prompts[]}, which launches the sub-agents and returns immediately. The model
-// does NOT get <prefix>_status or <prefix>_result: with them at hand it kept
-// polling the status in a loop instead of moving on or ending the turn. Each
-// sub-agent's result arrives on its own (AvisoTerminadas); the user follows
-// along via /tasks. statusSpec and resultSpec remain for the lifecycle tests.
+// Especificacoes returns the model's delegation tools: the launcher
+// <prefix> {prompts[]}, which launches the sub-agents and returns immediately,
+// and <prefix>_status, a non-blocking snapshot so the parent can answer "how
+// are they doing?". There is no <prefix>_result: each sub-agent's result
+// arrives on its own (AvisoTerminadas). With a result tool at hand the model
+// kept polling in a loop, so status is rate-limited (see statusSpec) and tells
+// the model to end its turn instead. resultSpec remains for the lifecycle tests.
 //
 // parentCfg is the parent's configuration, inherited by the tasks (same
 // provider, model and key). Spawn does not get a long-lived ctx: the tool
@@ -38,7 +40,7 @@ func Especificacoes(g *Gerente, parentCfg config.Config) []tools.Spec {
 	}
 	g.ConfigPai(parentCfg)
 	p := g.Prefixo()
-	return []tools.Spec{spawnSpec(g, p)}
+	return []tools.Spec{spawnSpec(g, p), statusSpec(g, p)}
 }
 
 // ── spawn: the manager's launcher tool; its name IS the prefix ────────────
@@ -51,10 +53,11 @@ func spawnSpec(g *Gerente, prefix string) tools.Spec {
 		Description: "Call it ONCE per turn, with all requests in prompts[]. Launches one or SEVERAL sub-agents at once, in the BACKGROUND, and returns their ids immediately. " +
 			"Each sub-agent runs autonomously with the built-in tools (terminal, files), but CANNOT " +
 			"create other sub-agents. There is no limit on count or concurrency: they all start together. " +
-			"There is no tool to check on or wait for them: when each sub-agent finishes or fails, its result arrives " +
+			"You cannot wait for them: when each sub-agent finishes, fails or dies, its result arrives " +
 			"on its own as a new message, in a new turn. A second call in the same turn is REJECTED with an error. " +
 			"Never launch tasks to pass the time or to wait. After launching, only do work that does not " +
-			"depend on the results, or END THE TURN telling the user what you launched and that you are waiting.",
+			"depend on the results, or END THE TURN telling the user what you launched and that you are waiting. " +
+			"" + prefix + "_status only reports progress when the user asks; it is not a way to wait.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -114,25 +117,119 @@ func spawnSpec(g *Gerente, prefix string) tools.Spec {
 
 // ── <prefix>_status ────────────────────────────────────────────────────────
 
+// StatusIntervaloMinimo is the shortest time between two FULL status reports,
+// counted from the last launch or the last full report. Inside the window the
+// tool answers with one line per task and an order to end the turn, so a model
+// that polls gets nothing new to chew on and no reason to loop. Never blocks.
+const StatusIntervaloMinimo = 60 * time.Second
+
 func statusSpec(g *Gerente, prefix string) tools.Spec {
 	return tools.Spec{
 		Name: prefix + "_status",
-		Description: "Lists the sibling tasks with id, state (queued/running/completed/failed/cancelled) " +
-			"and age. Does not return results — for the text use " + prefix + "_result.",
+		Description: "Non-blocking snapshot of the sub-agents: id, state (running/completed/failed/cancelled), age " +
+			"and what each one is doing now. Use it ONLY when the user asks how they are going. It is NOT a way to " +
+			"wait: results, failures and crashes arrive on their own as a new message. Calling it again within " +
+			"60 s returns only a short state list.",
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}},
 		Exec: func(context.Context, string, json.RawMessage) (string, error) {
-			list := g.Tarefas()
-			if len(list) == 0 {
-				return "no tasks yet", nil
-			}
-			now := time.Now()
-			var sb strings.Builder
-			for i, t := range list {
-				fmt.Fprintf(&sb, "%d. %s %s %s\n", i+1, t.ID, t.Estado, ageText(now, t))
-			}
-			return strings.TrimRight(sb.String(), "\n"), nil
+			return g.statusReport(), nil
 		},
 	}
+}
+
+// statusReport builds the status text and applies the anti-polling guard.
+func (g *Gerente) statusReport() string {
+	fotos := g.Fotos()
+	if len(fotos) == 0 {
+		return "no sub-agents yet"
+	}
+	now := g.clock()
+	active := 0
+	var newest time.Time
+	for i := range fotos {
+		if fotos[i].TerminadaEm.IsZero() {
+			active++
+		}
+		if fotos[i].Criada.After(newest) {
+			newest = fotos[i].Criada
+		}
+	}
+	g.mu.Lock()
+	ref := g.lastStatus
+	if newest.After(ref) {
+		ref = newest
+	}
+	short := active > 0 && now.Sub(ref) < StatusIntervaloMinimo
+	if !short {
+		g.lastStatus = now
+	}
+	g.mu.Unlock()
+
+	var sb strings.Builder
+	for i := range fotos {
+		t := &fotos[i]
+		fmt.Fprintf(&sb, "%s %s %s", t.ID, t.Estado, ageText(now, t))
+		if !short {
+			fmt.Fprintf(&sb, " | %s", lastActivity(t))
+		}
+		sb.WriteString("\n")
+	}
+	switch {
+	case active == 0:
+		sb.WriteString("\nNone is running. Results that were not delivered yet arrive as a message.\n")
+	case short:
+		sb.WriteString("\nStatus was just checked. Do NOT call it again: END THE TURN now. The result of each " +
+			"sub-agent (success, error or crash) arrives on its own as a new message.\n")
+	default:
+		fmt.Fprintf(&sb, "\n%d still running. Tell the user and END THE TURN: each result (success, error or crash) "+
+			"arrives on its own as a new message. Do not poll.\n", active)
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// lastActivity is a one-line description of what a task did last.
+func lastActivity(t *Tarefa) string {
+	if t.TerminadaEm.IsZero() {
+		ev := t.conversa
+		for i := len(ev) - 1; i >= 0; i-- {
+			e := ev[i]
+			switch e.Tipo {
+			case EventoToolCall:
+				state := "running"
+				if !e.Executando {
+					state = "done"
+					if e.Erro {
+						state = "failed"
+					}
+				}
+				return fmt.Sprintf("tool %s (%s); %d tool calls so far", e.Nome, state, len(t.transcript))
+			case EventoResposta, EventoNota, EventoPensamento:
+				return e.Tipo + ": " + excerpt(e.Texto, 160)
+			}
+		}
+		return "starting"
+	}
+	switch t.Estado {
+	case Completed:
+		if strings.TrimSpace(t.Resultado) == "" {
+			return "finished with no final text"
+		}
+		return "finished: " + excerpt(t.Resultado, 160)
+	default:
+		return "error: " + orEmpty(t.Erro)
+	}
+}
+
+func excerpt(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= n {
+		return s
+	}
+	s = s[:n]
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s + "…"
 }
 
 // ageText summarizes the relevant time: for finished tasks, from creation to
