@@ -245,3 +245,48 @@ func TestClientPromptDuringNoticeTurnIsQueued(t *testing.T) {
 		t.Fatalf("turn order = %q", got)
 	}
 }
+
+// Activity without a task id, or for a session the agent does not know, is
+// dropped: nothing reaches the client and nothing panics.
+func TestSubagentActivityIgnoredWithoutTaskOrSession(t *testing.T) {
+	h := setup(t, &recTurn{})
+	h.a.HabilitarAvisosSubagentes()
+	h.send(t, MetSessionNovo, 1, map[string]any{"cwd": t.TempDir()})
+	waitLines(t, h.out, 1)
+
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "", subagent.Evento{Tipo: subagent.EventoNota, Texto: "x"})
+	h.a.AvisarAtividadeSubagente("s-unknown", "t1", subagent.Evento{Tipo: subagent.EventoNota, Texto: "x"})
+
+	if lines := readLines(t, h.out); len(lines) != 1 {
+		t.Fatalf("only the session creation should be on the wire, got %d: %s", len(lines), h.out.String())
+	}
+}
+
+// System events (compaction, output cut) are tagged child activity too.
+func TestSubagentSystemEventIsTaggedChildActivity(t *testing.T) {
+	h := setup(t, &recTurn{})
+	h.a.HabilitarAvisosSubagentes()
+	h.send(t, MetSessionNovo, 1, map[string]any{"cwd": t.TempDir()})
+	waitLines(t, h.out, 1)
+
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{Tipo: subagent.EventoSistema, Texto: "Context compacted"})
+
+	lines := readLines(t, h.out)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %s", len(lines), h.out.String())
+	}
+	update := lines[1].Params.Update
+	if update.SessionUpdate != "agent_message_chunk" || update.Content.Blocks[0].Text != "Context compacted" {
+		t.Fatalf("update = %+v", update)
+	}
+	var meta map[string]struct {
+		TaskID string `json:"taskId"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(update.Meta, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if a := meta[SubagentActivityMeta]; a.TaskID != "t7" || a.Kind != "system" {
+		t.Fatalf("meta = %+v", a)
+	}
+}
