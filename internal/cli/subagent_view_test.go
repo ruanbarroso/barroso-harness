@@ -43,6 +43,12 @@ func TestSubagentDialogOpensAndCycles(t *testing.T) {
 	if sc.dlg.taskID != id {
 		t.Fatalf("shift+tab should come back to %s, got %s", id, sc.dlg.taskID)
 	}
+	// A half-typed message must not follow the tab into another agent.
+	sc.dlg.input = []rune("metade de uma mensagem")
+	sc.dialogKey(keyEvent{action: "tab"})
+	if len(sc.dlg.input) != 0 {
+		t.Fatalf("tab should clear the message field, got %q", string(sc.dlg.input))
+	}
 	sc.frame() // painting must not panic and must keep the dialog open
 	if sc.dlg == nil {
 		t.Fatal("frame closed the dialog")

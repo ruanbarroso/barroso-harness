@@ -719,6 +719,10 @@ func (g *Gerente) Mensagem(id, text string) error {
 	childCtx, cancel := context.WithCancel(parent)
 	t.ctx, t.cancel = childCtx, cancel
 	t.Estado, t.Erro, t.Resultado, t.TerminadaEm = Running, "", "", time.Time{}
+	// The resumed turn produces a NEW result: reopen delivery, otherwise
+	// Terminadas would skip the task (delivered from the first turn) and the
+	// parent would never receive the second answer.
+	delete(g.delivered, id)
 	t.appendConversa(event)
 	g.persistTask(t, false)
 	g.running++

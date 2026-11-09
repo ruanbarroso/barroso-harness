@@ -452,6 +452,9 @@ func (t *screen) cycleSubagentDialog(d *dialog, direction int) {
 		}
 	}
 	d.taskID = tasks[(index+direction+len(tasks))%len(tasks)].ID
+	// A half-typed message belongs to the previous agent: moving on without
+	// clearing it would send the text to the wrong sub-agent on Enter.
+	d.input, d.tselOn, d.tselDrag = nil, false, false
 	d.off = 0
 	t.updateSubagentDialog(d)
 }

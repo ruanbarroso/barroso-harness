@@ -140,6 +140,36 @@ func TestSubagentActivityIsTaggedAndToolCallClosesByChildID(t *testing.T) {
 	}
 }
 
+// The user's message to the child reaches ACP clients as tagged child activity,
+// so the client routes it to the child transcript instead of the parent's.
+func TestSubagentUserMessageIsTaggedChildActivity(t *testing.T) {
+	h := setup(t, &recTurn{})
+	h.a.HabilitarAvisosSubagentes()
+	h.send(t, MetSessionNovo, 1, map[string]any{"cwd": t.TempDir()})
+	waitLines(t, h.out, 1)
+
+	h.a.AvisarAtividadeSubagente("s-deadbeef", "t7", subagent.Evento{Tipo: subagent.EventoUsuario, Texto: "continue de onde parou"})
+
+	lines := readLines(t, h.out)
+	if len(lines) != 2 {
+		t.Fatalf("expected session creation plus one child activity update, got %d: %s", len(lines), h.out.String())
+	}
+	update := lines[1].Params.Update
+	if update.SessionUpdate != "agent_message_chunk" || update.Content.Blocks[0].Text != "continue de onde parou" {
+		t.Fatalf("child activity update = %+v", update)
+	}
+	var meta map[string]struct {
+		TaskID string `json:"taskId"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(update.Meta, &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if activity := meta[SubagentActivityMeta]; activity.TaskID != "t7" || activity.Kind != "user" {
+		t.Fatalf("child metadata = %+v", activity)
+	}
+}
+
 func TestSubagentNoticeRunsParentTurnAndEndsWithTurnEnd(t *testing.T) {
 	turn := &recTurn{}
 	h := setup(t, turn)
