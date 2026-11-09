@@ -60,6 +60,7 @@ const (
 	EventoResposta   = "assistant"
 	EventoToolCall   = "tool_call"
 	EventoSistema    = "system"
+	EventoUsuario    = "user"
 )
 
 // Evento is one visible part of a sub-agent's conversation. Tool calls and
@@ -113,6 +114,7 @@ type Tarefa struct {
 
 	cancel     context.CancelFunc
 	ctx        context.Context // child session; born together with the (ctx, cancel) pair
+	sess       *runtime.Session
 	transcript []string
 	conversa   []Evento
 }
@@ -458,7 +460,7 @@ func copyTask(t *Tarefa) Tarefa {
 	cp := *t
 	cp.transcript = append([]string(nil), t.transcript...)
 	cp.conversa = append([]Evento(nil), t.conversa...)
-	cp.cancel, cp.ctx = nil, nil
+	cp.cancel, cp.ctx, cp.sess = nil, nil, nil
 	return cp
 }
 
@@ -578,10 +580,12 @@ func (g *Gerente) Spawn(ctx context.Context, request string) (string, error) {
 	t.ctx = childCtx
 	t.cancel = cancel
 	cfg, cwd = g.childCfg, g.cwd
+	t.sess = runtime.NewSession(cfg)
+	t.sess.ClearHistory()
 	t.markStarted()
 	g.running++
 	g.mu.Unlock()
-	go g.run(ctx, t, cfg, cwd)
+	go g.run(ctx, t, cwd)
 	return id, nil
 }
 
@@ -592,23 +596,8 @@ func (g *Gerente) Spawn(ctx context.Context, request string) (string, error) {
 //
 // The child session's (ctx, cancel) pair was already created in Spawn; here it
 // is used and released.
-func (g *Gerente) run(ctx context.Context, t *Tarefa, cfg config.Config, cwd string) {
-	defer func() {
-		// A panic inside the sub-agent runs in its own goroutine and, without
-		// recover, used to bring down the whole bh (main session included).
-		// It becomes a task failure.
-		if r := recover(); r != nil {
-			g.mu.Lock()
-			g.fin(t, Failed, fmt.Sprintf("panic: %v", r))
-			g.mu.Unlock()
-		}
-		g.mu.Lock()
-		if g.running > 0 {
-			g.running--
-		}
-		g.mu.Unlock()
-		g.notify()
-	}()
+func (g *Gerente) run(ctx context.Context, t *Tarefa, cwd string) {
+	defer func() { g.workerExit(t, recover()) }()
 
 	g.mu.Lock()
 	childCtx, cancel := t.ctx, t.cancel
@@ -621,29 +610,127 @@ func (g *Gerente) run(ctx context.Context, t *Tarefa, cfg config.Config, cwd str
 		g.mu.Unlock()
 		return
 	}
-	defer cancel()
 
 	// OWN TRANSCRIPT, no inheritance: NewSession already starts with an empty
 	// history; ClearHistory is just an explicit reinforcement of the invariant
 	// (the sub-agent does not see the parent's history, nor the parent the
 	// child's).
-	sess := runtime.NewSession(cfg)
-	sess.ClearHistory()
-
-	// Child session = tools.SpecsBuiltins() ONLY (session.go builds the list
-	// internally). No delegation spec reaches here: see the package doc.
-	err := sess.Send(childCtx, &collector{g: g, t: t}, cwd, t.Prompt)
-
 	g.mu.Lock()
-	switch {
-	case err == nil:
-		g.fin(t, Completed, "")
-	case childCtx.Err() != nil || ctx.Err() != nil || errors.Is(err, context.Canceled):
-		g.fin(t, Cancelled, "")
-	default:
-		g.fin(t, Failed, oneLine(err))
+	sess := t.sess
+	g.mu.Unlock()
+
+	g.turns(ctx, t, sess, childCtx, cancel, cwd, t.Prompt)
+}
+
+// workerExit closes a worker goroutine: a panic inside the sub-agent runs in
+// its own goroutine and, without recover, used to bring down the whole bh (main
+// session included), so it becomes a task failure; then the slot is released
+// and the parent is notified.
+func (g *Gerente) workerExit(t *Tarefa, recovered any) {
+	if recovered != nil {
+		g.mu.Lock()
+		g.fin(t, Failed, fmt.Sprintf("panic: %v", recovered))
+		g.mu.Unlock()
+	}
+	g.mu.Lock()
+	if g.running > 0 {
+		g.running--
 	}
 	g.mu.Unlock()
+	g.notify()
+}
+
+// turns sends the prompt and then every message the user queued while the turn
+// ran, until the inbox is empty. The inbox is read under g.mu, the same lock
+// Mensagem takes before queuing, so a message is either seen here or starts a
+// new turn: it is never left behind a finished task.
+//
+// Child session = tools.SpecsBuiltins() ONLY (session.go builds the list
+// internally). No delegation spec reaches here: see the package doc.
+func (g *Gerente) turns(ctx context.Context, t *Tarefa, sess *runtime.Session, childCtx context.Context, cancel context.CancelFunc, cwd, prompt string) {
+	defer cancel()
+	for {
+		err := sess.Send(childCtx, &collector{g: g, t: t}, cwd, prompt)
+
+		g.mu.Lock()
+		switch {
+		case err == nil:
+			if queued := sess.TakeInbox(); len(queued) > 0 {
+				texts := make([]string, len(queued))
+				for i, m := range queued {
+					texts[i] = m.Text
+				}
+				prompt = strings.Join(texts, "\n\n")
+				g.mu.Unlock()
+				continue
+			}
+			g.fin(t, Completed, "")
+		case childCtx.Err() != nil || ctx.Err() != nil || errors.Is(err, context.Canceled):
+			g.fin(t, Cancelled, "")
+		default:
+			g.fin(t, Failed, oneLine(err))
+		}
+		sess.TakeInbox()
+		g.mu.Unlock()
+		return
+	}
+}
+
+// Mensagem sends a user message to a sub-agent. While the task runs, the text
+// joins the conversation at the next safe boundary (steer). Once the task has
+// finished, it resumes the same session with a new turn, so the sub-agent
+// keeps everything it already knows. A task restored from a previous process
+// has no session and refuses.
+func (g *Gerente) Mensagem(id, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("empty message")
+	}
+	g.mu.Lock()
+	t := g.tasks[id]
+	switch {
+	case t == nil:
+		g.mu.Unlock()
+		return fmt.Errorf("task %s does not exist", id)
+	case t.sess == nil:
+		g.mu.Unlock()
+		return fmt.Errorf("task %s has no live session (it did not start in this process)", id)
+	case t.Estado == Queued:
+		g.mu.Unlock()
+		return fmt.Errorf("task %s has not started yet", id)
+	}
+	event := Evento{Tipo: EventoUsuario, Texto: text}
+	fn := g.onActivity
+	if t.Estado == Running {
+		t.sess.AddSteer(runtime.Steer{Text: text})
+		t.appendConversa(event)
+		g.mu.Unlock()
+		if fn != nil {
+			fn(id, event)
+		}
+		return nil
+	}
+
+	parent, cwd, sess := g.parent, g.cwd, t.sess
+	if parent.Err() != nil {
+		g.mu.Unlock()
+		return fmt.Errorf("the session is closing; task %s cannot resume", id)
+	}
+	childCtx, cancel := context.WithCancel(parent)
+	t.ctx, t.cancel = childCtx, cancel
+	t.Estado, t.Erro, t.Resultado, t.TerminadaEm = Running, "", "", time.Time{}
+	t.appendConversa(event)
+	g.persistTask(t, false)
+	g.running++
+	g.mu.Unlock()
+	if fn != nil {
+		fn(id, event)
+	}
+	go func() {
+		defer func() { g.workerExit(t, recover()) }()
+		g.turns(parent, t, sess, childCtx, cancel, cwd, text)
+	}()
+	return nil
 }
 
 // Cancelar stops a task. Queued becomes cancelled immediately; running gets

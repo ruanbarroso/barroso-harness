@@ -37,6 +37,9 @@ func subagentConversationLines(task subagent.Tarefa, width int) []string {
 			}
 			out = append(out, head)
 			add("  ", e.Texto)
+		case subagent.EventoUsuario:
+			out = append(out, "You")
+			add("  ", e.Texto)
 		case subagent.EventoNota, subagent.EventoResposta:
 			add("", e.Texto)
 		case subagent.EventoToolCall:

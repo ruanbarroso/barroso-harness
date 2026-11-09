@@ -52,6 +52,7 @@ type dialogGeo struct {
 	left, top, width, bottom int
 	titleRow, escCol         int
 	rowItem                  map[int]int // screen row -> item index
+	textTop, textRows        int         // first screen row of a text body and how many rows it has
 }
 
 // dialog is the open overlay. Exactly one of items/text/prompt is its body.
@@ -70,6 +71,13 @@ type dialog struct {
 	// dialog the key/mouse model opens stays a read-only text panel.
 	taskID    string
 	taskLines int
+	// input is the message typed to the sub-agent of an open inspector.
+	input []rune
+	// tsel is the mouse selection over a text body; tselDrag is true while the
+	// button is held.
+	tsel     selRange
+	tselOn   bool
+	tselDrag bool
 	// choose runs for the chosen row; submit for a prompt's text. Both return a
 	// slash command for the REPL, or "" when the dialog handled it itself.
 	choose func(t *screen, it dialogItem) string
@@ -416,7 +424,7 @@ func (t *screen) updateSubagentDialog(d *dialog) {
 		}
 		d.title = "Subagent " + task.ID + " · " + status
 		width := max(20, min(d.size, max(20, t.w-2))-8)
-		maxRows := max(3, t.h/2-6)
+		maxRows := t.dialogTextRows(d)
 		atBottom := d.off >= max(0, d.taskLines-maxRows)
 		d.text = subagentConversationLines(task, width)
 		if atBottom {
@@ -557,6 +565,9 @@ func (t *screen) dialogKey(k keyEvent) string {
 	if d.upd != nil {
 		return t.updateKey(name)
 	}
+	if d.text != nil && d.taskID != "" {
+		return t.chatKey(d, k, name)
+	}
 	if d.text != nil {
 		switch name {
 		case keyUp, "ctrl+p", "k":
@@ -646,6 +657,11 @@ func (t *screen) dialogMouse(k keyEvent) (string, bool) {
 	if d.upd != nil && inside && !onEsc {
 		if cmd, repaint := t.updateMouse(k); repaint || cmd != "" {
 			return cmd, repaint
+		}
+	}
+	if d.taskID != "" && !onEsc {
+		if repaint, handled := t.chatMouse(d, k); handled {
+			return "", repaint
 		}
 	}
 	switch k.action {
@@ -753,12 +769,13 @@ func (t *screen) drawDialog(sb *strings.Builder) (int, int) {
 		put("")
 	}
 
-	maxRows := max(3, t.h/2-6)
+	maxRows := t.dialogTextRows(d)
 	switch {
 	case d.text != nil:
 		d.off = clampInt(d.off, 0, max(0, len(d.text)-maxRows))
-		for _, l := range d.text[d.off:min(len(d.text), d.off+maxRows)] {
-			put("   " + color(colorText, truncateVis(l, inner)))
+		d.geo.textTop, d.geo.textRows = row, maxRows
+		for i, l := range d.text[d.off:min(len(d.text), d.off+maxRows)] {
+			put("   " + dialogTextLine(d, d.off+i, l, inner))
 		}
 	case d.prompt:
 	case d.loading:
@@ -802,6 +819,12 @@ func (t *screen) drawDialog(sb *strings.Builder) (int, int) {
 				row++
 			}
 		}
+	}
+	if d.taskID != "" {
+		put("")
+		field, offset := chatField(d, inner)
+		curRow, curCol = row, left+chatBodyPad+offset
+		put("   " + field)
 	}
 	put("")
 	d.geo.bottom = row

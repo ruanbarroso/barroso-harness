@@ -510,7 +510,7 @@ func inline(s string) string {
 	s = reCode.ReplaceAllString(s, colorOrange+"$1"+reset)
 	s = reBold.ReplaceAllString(s, bold+"$1"+reset)
 	s = reItalic.ReplaceAllString(s, "$1"+italic+"$2"+reset)
-	return s
+	return styleLinks(s, "")
 }
 
 // ── utilities ─────────────────────────────────────────────────────────────

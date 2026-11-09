@@ -1556,10 +1556,7 @@ func (t *screen) copySelection() {
 	if text == "" {
 		return
 	}
-	fmt.Fprint(t.out, osc52(text))
-	if clipboardWrite == nil || clipboardWrite(text) != nil {
-		t.toastf("success", "Copied to clipboard")
-	}
+	t.copyText(text)
 	t.drawLocked()
 }
 
@@ -1570,12 +1567,13 @@ type keyEvent struct {
 	mouse bool
 	col   int
 	row   int
+	ctrl  bool
 }
 
 // mouseEvent maps a decoded SGR event onto a keyEvent action, carrying the
 // cell it happened on for the dispatcher.
 func mouseEvent(e mouseSeq) keyEvent {
-	k := keyEvent{mouse: true, col: e.Col, row: e.Row}
+	k := keyEvent{mouse: true, col: e.Col, row: e.Row, ctrl: e.Ctrl}
 	switch {
 	case e.Wheel == 64:
 		k.action = "rodacima"
@@ -1896,6 +1894,8 @@ func runScreen(io IO) int {
 					edit(func() { t.openSessionsDialog() })
 				case "m":
 					edit(func() { t.openModelDialog() })
+				case "a":
+					edit(func() { t.openTasksDialog() })
 				case "s":
 					edit(func() { t.openMCPDialog() })
 				case "b":
@@ -2074,6 +2074,13 @@ func runScreen(io IO) int {
 					case "mousemove":
 						t.mouseHover(k.row, k.col)
 					case "mousedown":
+						if k.ctrl {
+							if link := t.linkAt(k.row, k.col); link != "" {
+								t.openLink(link)
+								t.drawLocked()
+								return
+							}
+						}
 						// A click in the box's text places the caret there.
 						if t.clickBox(k.row, k.col) {
 							return
