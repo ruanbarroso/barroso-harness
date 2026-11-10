@@ -180,6 +180,9 @@ type screen struct {
 	// pendingTaskID is a sub-agent a click asked to inspect: the key loop opens
 	// its conversation dialog.
 	pendingTaskID string
+	// barFocus/barSel: the agents bar row picked with the arrow keys.
+	barFocus bool
+	barSel   int
 	// mcpOpen is the sidebar's MCP collapse state (open by default).
 	mcpOpen bool
 	// wasHome is whether the last frame was the home screen.
@@ -649,6 +652,8 @@ type frame struct {
 	boxGapRow  int // the blank metadata padding row (paddingTop 1)
 	boxCapRow  int
 	footerRow  int
+	agentRow   int // first row of the agents bar under the footer
+	agentN     int // number of agent rows (0 when no sub-agent is working)
 	barCol     int // 1-based column of the ┃ of the box
 	textCol    int // 1-based column where the box's text starts
 	boxWidth   int // width of the ┃..end of the painted box
@@ -674,7 +679,9 @@ func (t *screen) frameFor() frame {
 	boxN := len(t.boxLines(max(6, t.h/3))) // OpenCode: maxHeight = max(6, floor(H/3))
 	// Rows are counted from the bottom so the block always ends on H−1 (footer)
 	// with row H blank, no matter how tall the typing area is.
-	f.footerRow = t.h - 1
+	f.agentN = t.agentRowCount()
+	f.footerRow = t.h - 1 - f.agentN
+	f.agentRow = f.footerRow + 1
 	f.boxCapRow = f.footerRow - 1
 	f.boxMetaRow = f.boxCapRow - 1
 	f.boxGapRow = f.boxMetaRow - 1
@@ -806,6 +813,7 @@ func (t *screen) drawLocked() {
 	t.drawBox(&sb, f)
 	t.drawDock(&sb, f)
 	t.drawFooter(&sb, f)
+	t.drawAgents(&sb, f)
 	if t.panelVisible() {
 		t.drawPanel(&sb, f)
 	}
@@ -1053,6 +1061,13 @@ func (t *screen) footerParts(w int) (string, string) {
 			label += "s"
 		}
 		left += "  " + grayf("ctrl+x a ") + color(colorText, label)
+	}
+	if n := len(t.src.shells()); n > 0 {
+		label := fmt.Sprintf("%d shell", n)
+		if n > 1 {
+			label += "s"
+		}
+		left += "  " + color(colorText, label)
 	}
 	// OpenCode's fit rule: available = (W-8) - min(28, (W-8)/2).
 	available := max(0, w-8-min(28, (w-8)/2))
@@ -1934,6 +1949,11 @@ func runScreen(io IO) int {
 					continue
 				}
 				if strings.TrimSpace(t.editor().Text()) == "" {
+					if t.barOpen() {
+						t.drawLocked()
+						t.mu.Unlock()
+						continue
+					}
 					// Empty Enter: while a turn runs it promotes the first queued
 					// prompt to a steer; after an interrupt it resumes the queue.
 					switch {
@@ -2161,6 +2181,13 @@ func runScreen(io IO) int {
 				t.mu.Unlock()
 				command("/effort " + nextEffort(cur))
 			case keyEsc:
+				t.mu.Lock()
+				focused := t.barFocus
+				t.mu.Unlock()
+				if focused {
+					edit(func() { t.barFocus = false })
+					continue
+				}
 				// A selection cancels itself on Esc before any other action,
 				// as OpenCode does.
 				t.mu.Lock()
@@ -2224,7 +2251,7 @@ func runScreen(io IO) int {
 				output <- "/exit"
 			default:
 				edit(func() {
-					if t.editKey(name) {
+					if t.barKey(name) || t.editKey(name) {
 						return
 					}
 					if k.action == "" && k.text != "" {

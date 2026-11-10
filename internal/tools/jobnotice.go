@@ -11,6 +11,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,58 @@ func (s *JobSet) Ativas() int {
 		}
 	}
 	return n
+}
+
+// JobVisao is a running background job, as the UI lists it.
+type JobVisao struct {
+	ID      string
+	Command string
+	Start   time.Time
+}
+
+// Visao lists this set's background jobs still running, oldest first. It
+// does not mark anything as read by the model.
+func (s *JobSet) Visao() []JobVisao {
+	if s == nil {
+		return nil
+	}
+	jobsMu.Lock()
+	defer jobsMu.Unlock()
+	var out []JobVisao
+	for _, j := range jobs {
+		if j.set != s || j.finished() {
+			continue
+		}
+		j.mu.Lock()
+		bg := j.bg
+		j.mu.Unlock()
+		if bg {
+			out = append(out, JobVisao{ID: j.id, Command: j.command, Start: j.start})
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Start.Before(out[b].Start) })
+	return out
+}
+
+// Saida is the output a job has produced so far, without consuming it.
+func (s *JobSet) Saida(id string) (string, bool) {
+	j, ok := lookupJob(id)
+	if !ok || j.set != s {
+		return "", false
+	}
+	return j.out.render(false), true
+}
+
+// Parar stops a job of this set, as shell_kill does.
+func (s *JobSet) Parar(id string) bool {
+	j, ok := lookupJob(id)
+	if !ok || j.set != s {
+		return false
+	}
+	if !j.finished() {
+		j.kill("stopped from the agents bar")
+	}
+	return true
 }
 
 // AvisoJobs builds the message the agent receives when background jobs end.
