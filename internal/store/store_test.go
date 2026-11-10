@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -464,5 +465,66 @@ func TestFirstUserMessageSkipsSyntheticMessages(t *testing.T) {
 	_, _ = st.StoreEvent("y", "user_message", map[string]any{"role": "user", "content": "real question"})
 	if got := st.PrimeiraFala("y"); got != "real question" {
 		t.Fatalf("first message = %q", got)
+	}
+}
+
+// A writer holding a write transaction is the condition that makes Open fail
+// with a lock error: several `bh -acp` processes opening the same sessions.db
+// at once. Open must wait for the writer instead of giving up, because a
+// failed Open means "session not persisted" and the conversation loses its
+// history.
+func TestOpenWaitsForWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.db")
+
+	// The writer uses the same driver but its own connection, held in an
+	// explicit transaction so the database stays write-locked.
+	db, err := sql.Open(NomeDriver, "file:"+filepath.ToSlash(path)+"?_pragma=busy_timeout(100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(sqlSchema); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO sessions (id, created_at, updated_at, title, metadata_json) VALUES ('w', 'x', 'x', '', '{}')`); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan *Store, 1)
+	go func() {
+		st, err := Open(path)
+		if err == nil {
+			done <- st
+		}
+	}()
+	select {
+	case st := <-done:
+		_ = st.Fechar()
+		t.Fatal("Open succeeded while a writer held the database")
+	case <-time.After(150 * time.Millisecond):
+		// Still waiting — what we want.
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case st := <-done:
+		if st == nil {
+			t.Fatal("nil store without error")
+		}
+		if st.Caminho() != path {
+			t.Fatalf("path = %q", st.Caminho())
+		}
+		if err := st.Fechar(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open did not finish after the writer released the lock")
 	}
 }
