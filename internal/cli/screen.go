@@ -649,6 +649,8 @@ type frame struct {
 	boxGapRow  int // the blank metadata padding row (paddingTop 1)
 	boxCapRow  int
 	footerRow  int
+	agentRow   int // first row of the agents bar under the footer
+	agentN     int // number of agent rows (0 when no sub-agent is working)
 	barCol     int // 1-based column of the ┃ of the box
 	textCol    int // 1-based column where the box's text starts
 	boxWidth   int // width of the ┃..end of the painted box
@@ -674,7 +676,9 @@ func (t *screen) frameFor() frame {
 	boxN := len(t.boxLines(max(6, t.h/3))) // OpenCode: maxHeight = max(6, floor(H/3))
 	// Rows are counted from the bottom so the block always ends on H−1 (footer)
 	// with row H blank, no matter how tall the typing area is.
-	f.footerRow = t.h - 1
+	f.agentN = t.agentRowCount()
+	f.footerRow = t.h - 1 - f.agentN
+	f.agentRow = f.footerRow + 1
 	f.boxCapRow = f.footerRow - 1
 	f.boxMetaRow = f.boxCapRow - 1
 	f.boxGapRow = f.boxMetaRow - 1
@@ -806,6 +810,7 @@ func (t *screen) drawLocked() {
 	t.drawBox(&sb, f)
 	t.drawDock(&sb, f)
 	t.drawFooter(&sb, f)
+	t.drawAgents(&sb, f)
 	if t.panelVisible() {
 		t.drawPanel(&sb, f)
 	}
