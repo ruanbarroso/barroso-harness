@@ -38,6 +38,13 @@ const NomeDriver = "sqlite"
 // ErrSessaoInexistente is returned when an id does not exist in sessions.
 var ErrSessaoInexistente = errors.New("session does not exist")
 
+// ErrTransitorio marks failures that are EXPECTED to clear by retrying: the
+// sqlite file lock (SQLITE_BUSY "database is locked") above all. It is what
+// tells session/load "retry" instead of "this session is gone" — the difference
+// between the connector reopening a conversation and silently replacing it with
+// an empty one. Callers must NOT treat it as a missing session.
+var ErrTransitorio = errors.New("store: transient failure (retry)")
+
 // TsFormato is the timestamp format in the log: RFC3339 with millisecond
 // precision, always in UTC. Fixed so that the lexicographic order of
 // updated_at (ListSessions) matches chronological order.
@@ -111,7 +118,7 @@ func Open(path string) (*Store, error) {
 	if s, ok := registry[abs]; ok {
 		return s, nil
 	}
-	dsn := "file:" + filepath.ToSlash(abs) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	dsn := "file:" + filepath.ToSlash(abs) + "?_pragma=busy_timeout(" + busyTimeoutStr + ")&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	db, err := sql.Open(NomeDriver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", abs, err)
@@ -120,7 +127,11 @@ func Open(path string) (*Store, error) {
 	// writes under WAL still serialize on the file lock. The cache above
 	// already keeps a second connection from being opened anyway.
 	db.SetMaxOpenConns(1)
-	if err := db.Ping(); err != nil {
+	// The first ping can still lose the race against another writer that holds
+	// the lock (this is what made `bh -acp` report "session not persisted ...
+	// database is locked" and silently run without a log). Retry with backoff
+	// before giving up: the alternative was a session that never persisted.
+	if err := pingRetry(db, pingTentativas); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: ping %s: %w", abs, err)
 	}
@@ -245,6 +256,10 @@ func (s *Store) SetTitle(id, title string) error {
 // GetSession returns the session; the error distinguishes "does not exist"
 // from a real failure.
 func (s *Store) GetSession(id string) (*Session, error) {
+	return retryLeitura(func() (*Session, error) { return s.getSession(id) })
+}
+
+func (s *Store) getSession(id string) (*Session, error) {
 	row := s.db.QueryRow(`SELECT id, created_at, updated_at, title FROM sessions WHERE id = ?`, id)
 	var se Session
 	err := row.Scan(&se.ID, &se.CreatedAt, &se.UpdatedAt, &se.Title)
@@ -372,6 +387,10 @@ func (s *Store) StoreEvent(sessionID, kind string, payload map[string]any) (int,
 // ListEvents returns the session's events starting at fromSeq (inclusive), at
 // most limit of them. limit <= 0 means "all". Order: ascending seq.
 func (s *Store) ListEvents(sessionID string, fromSeq, limit int) ([]Event, error) {
+	return retryLeitura(func() ([]Event, error) { return s.listEvents(sessionID, fromSeq, limit) })
+}
+
+func (s *Store) listEvents(sessionID string, fromSeq, limit int) ([]Event, error) {
 	q := `SELECT seq, session_id, ts, kind, payload_json FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq ASC`
 	args := []any{sessionID, fromSeq}
 	if limit > 0 {

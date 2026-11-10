@@ -42,6 +42,7 @@ import (
 	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
+	"github.com/ruanbarroso/barroso-harness/internal/store"
 )
 
 // Turno is the testable seam of the runtime: the only thing the agent needs
@@ -381,6 +382,14 @@ func (a *Agente) loadSession(w io.Writer, req Request) error {
 	} else {
 		t, err := a.Carregar(a.cfg, p.SessionID)
 		if err != nil {
+			// A lock (or other transient failure) is NOT a missing session.
+			// Answering -32602 made the connector fall back to session/new and
+			// overwrite the conversation's session id: silent amnesia. A
+			// distinct code and message tell the client to retry the same id.
+			if errors.Is(err, store.ErrTransitorio) {
+				a.logf("acp: session %s: transient load failure: %v", p.SessionID, err)
+				return WriteError(w, req.ID, CodTransitorio, "session temporarily unavailable, retry session/load with the SAME id (do not create a new session): "+p.SessionID+": "+errorMessage(err))
+			}
 			return WriteError(w, req.ID, CodParams, "session not loaded: "+p.SessionID+": "+errorMessage(err))
 		}
 		turn = t
