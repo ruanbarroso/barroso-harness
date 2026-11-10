@@ -2,6 +2,8 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,9 +32,17 @@ func TestOpenCreatesFileAndSchema(t *testing.T) {
 
 	// WAL leaves the file on disk; if the schema had not run, every query
 	// below would blow up, so the test covers both things.
-	for _, table := range []string{"sessions", "events", "blobs"} {
+	// Open touches no database; the schema is created with the session file.
+	if err := st.NewSession("schema-check"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := st.sessionDB("schema-check", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"sessions", "events"} {
 		var n int
-		if err := st.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 			t.Fatalf("table %s missing after schema: %v", table, err)
 		}
 	}
@@ -156,12 +166,17 @@ func TestBlobRoundtrip(t *testing.T) {
 	if ref2["blob"] != ref["blob"] {
 		t.Fatalf("unstable hash: %v vs %v", ref2["blob"], ref["blob"])
 	}
-	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM blobs`).Scan(&n); err != nil {
+	n := 0
+	if err := filepath.WalkDir(st.blobsDir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			n++
+		}
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Fatalf("duplicated blobs: %d rows", n)
+		t.Fatalf("duplicated blobs: %d files", n)
 	}
 
 	// An event referencing the blob: the payload stays short and rehydration
@@ -468,63 +483,130 @@ func TestFirstUserMessageSkipsSyntheticMessages(t *testing.T) {
 	}
 }
 
-// A writer holding a write transaction is the condition that makes Open fail
-// with a lock error: several `bh -acp` processes opening the same sessions.db
-// at once. Open must wait for the writer instead of giving up, because a
-// failed Open means "session not persisted" and the conversation loses its
-// history.
-func TestOpenWaitsForWriteLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sessions.db")
-
-	// The writer uses the same driver but its own connection, held in an
-	// explicit transaction so the database stays write-locked.
-	db, err := sql.Open(NomeDriver, "file:"+filepath.ToSlash(path)+"?_pragma=busy_timeout(100)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(sqlSchema); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`INSERT INTO sessions (id, created_at, updated_at, title, metadata_json) VALUES ('w', 'x', 'x', '', '{}')`); err != nil {
+// The point of one file per session: a write lock held on one session must not
+// stop another session from persisting (it used to, when every `bh -acp`
+// shared one sessions.db and a lock made a conversation lose its history).
+func TestLockOnOneSessionDoesNotBlockAnother(t *testing.T) {
+	st := openTestStore(t)
+	if _, err := st.StoreEvent("a", "user_message", map[string]any{"content": "hi"}); err != nil {
 		t.Fatal(err)
 	}
 
-	done := make(chan *Store, 1)
+	// A second connection holds session a's file write-locked.
+	raw, err := sql.Open(NomeDriver, "file:"+filepath.ToSlash(st.fileFor("a"))+"?_pragma=busy_timeout(100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tx, err := raw.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE sessions SET title = 'locked' WHERE id = 'a'`); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
 	go func() {
-		st, err := Open(path)
-		if err == nil {
-			done <- st
-		}
+		_, err := st.StoreEvent("b", "user_message", map[string]any{"content": "other"})
+		done <- err
 	}()
 	select {
-	case st := <-done:
-		_ = st.Fechar()
-		t.Fatal("Open succeeded while a writer held the database")
-	case <-time.After(150 * time.Millisecond):
-		// Still waiting — what we want.
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("session b failed while a was locked: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session b blocked by a lock on session a")
 	}
+}
 
-	if err := tx.Commit(); err != nil {
+const legacySchema = `
+CREATE TABLE sessions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), ts TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);
+CREATE TABLE blobs (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, data BLOB NOT NULL);`
+
+// Sessions and blobs written by the old single-file layout stay readable, are
+// copied into their own file on first use, and the old file is never written.
+func TestLegacyDatabaseIsMigratedOnDemandAndStaysUntouched(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "sessions.db")
+	db, err := sql.Open(NomeDriver, "file:"+filepath.ToSlash(legacyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatal(err)
+	}
+	blob := []byte(strings.Repeat("old blob ", 100))
+	hash := sha256Hex(blob)
+	for _, q := range []string{
+		`INSERT INTO sessions VALUES ('old-1','2024-01-01T10:00:00.000Z','2024-01-01T11:00:00.000Z','legacy title','{}')`,
+		`INSERT INTO events (seq, session_id, ts, kind, payload_json) VALUES (7,'old-1','2024-01-01T10:00:00.000Z','user_message','{"content":"hello","role":"user"}')`,
+		`INSERT INTO events (seq, session_id, ts, kind, payload_json) VALUES (9,'old-1','2024-01-01T10:01:00.000Z','assistant','{"content":"hi","role":"assistant"}')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO blobs VALUES (?, ?, ?)`, hash, len(blob), blob); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	before, err := os.ReadFile(legacyPath)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	select {
-	case st := <-done:
-		if st == nil {
-			t.Fatal("nil store without error")
-		}
-		if st.Caminho() != path {
-			t.Fatalf("path = %q", st.Caminho())
-		}
-		if err := st.Fechar(); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Open did not finish after the writer released the lock")
+	st, err := Open(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Fechar()
+
+	// Listed before any migration.
+	list, err := st.ListSessions(10)
+	if err != nil || len(list) != 1 || list[0].ID != "old-1" || list[0].Title != "legacy title" {
+		t.Fatalf("legacy list = %+v, %v", list, err)
+	}
+	// Read, with the original seq numbers kept.
+	evs, err := st.ListEvents("old-1", 0, 0)
+	if err != nil || len(evs) != 2 || evs[0].Seq != 7 || evs[1].Seq != 9 {
+		t.Fatalf("legacy events = %+v, %v", evs, err)
+	}
+	if got := st.PrimeiraFala("old-1"); got != "hello" {
+		t.Fatalf("first message = %q", got)
+	}
+	// Appending continues the sequence in the new file.
+	seq, err := st.StoreEvent("old-1", "user_message", map[string]any{"content": "again", "role": "user"})
+	if err != nil || seq != 10 {
+		t.Fatalf("append after migration: seq %d, %v", seq, err)
+	}
+	if _, err := os.Stat(st.fileFor("old-1")); err != nil {
+		t.Fatalf("session file not created: %v", err)
+	}
+	// Old blobs are served from the legacy table.
+	back, err := st.GetBlob(hash)
+	if err != nil || string(back) != string(blob) {
+		t.Fatalf("legacy blob: %v", err)
+	}
+	// Listed once, not twice.
+	if list, _ := st.ListSessions(10); len(list) != 1 {
+		t.Fatalf("session listed %d times after migration", len(list))
+	}
+	if _, err := st.GetSession("never-existed"); !errors.Is(err, ErrSessaoInexistente) {
+		t.Fatalf("missing session error = %v", err)
+	}
+
+	after, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("legacy sessions.db was modified")
 	}
 }

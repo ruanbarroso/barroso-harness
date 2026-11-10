@@ -10,6 +10,12 @@
 -- `blobs` holds what does not (and should not) fit in the log: large tool
 -- outputs. The event references them by {"blob": "<sha256hex>", "size": N},
 -- so the log stays short and readable without losing data.
+--
+-- ONE FILE PER SESSION. Each conversation lives in its own database, so two
+-- `bh -acp` processes writing at the same time contend on different files: a
+-- lock in one session no longer stops the others from persisting. `blobs` is
+-- gone from here: the content is a file named by its sha256, under the store's
+-- `blobs` directory.
 
 CREATE TABLE IF NOT EXISTS sessions (
     id             TEXT PRIMARY KEY,
@@ -29,9 +35,3 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_seq
     ON events(session_id, seq);
-
-CREATE TABLE IF NOT EXISTS blobs (
-    hash  TEXT PRIMARY KEY,
-    size  INTEGER NOT NULL,
-    data  BLOB NOT NULL
-);
