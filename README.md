@@ -230,7 +230,7 @@ The session name appears in the terminal tab (`BH | <name>`) and in the panel: i
 
 Links (http/https) are drawn in blue and underlined, and `Ctrl`+click opens them in the browser. Dragging over the conversation or over a sub-agent conversation selects and copies on release; with the mouse wheel captured, selecting anything else is `Shift` + drag (Windows Terminal and most terminals).
 
-While sub-agents or background shell jobs run, an agents bar appears under the footer: `main` first, then one row per running sub-agent and per background shell, with how long each has been running. Clicking a sub-agent row opens its live conversation; clicking a shell row opens its live output (`x` stops the job). The footer counts them (`N subagents`, `N shells`). Rows leave the bar when the work finishes.
+While sub-agents or background shell jobs run, an agents bar appears under the footer: `main` first, then one row per running sub-agent and per background shell, with how long each has been running. Clicking a sub-agent row opens its live conversation; clicking a shell row opens its live output (`x` stops the job). The footer counts them (`N subagents`, `N shells`). Rows leave the bar when the work finishes. With the prompt box empty, `←`/`→` move the focus along the bar (`▸`), `Enter` opens the focused row and `Esc` or typing drops the focus.
 
 The iSH build (linux/386, iPhone/iPad) always uses scrolling mode, since iSH sends no mouse wheel events; every other build always uses full screen. Pipes, redirection and `bh -p` never use full screen.
 

@@ -62,13 +62,16 @@ func (t *screen) agentRows(limit int) []agentRow {
 	return rows[:min(len(rows), limit)]
 }
 
-func agentLine(r agentRow, hover bool, width int) string {
+func agentLine(r agentRow, hover, selected bool, width int) string {
 	mark, fg := "○", colorText
 	if r.kind == rowMain {
 		mark, fg = "●", fgAccent
 	}
 	if hover {
 		fg = fgWarning
+	}
+	if selected {
+		mark, fg = "▸", fgAccent
 	}
 	left := "  " + color(fg, mark+" "+r.label)
 	if r.age == "" {
@@ -82,7 +85,8 @@ func agentLine(r agentRow, hover bool, width int) string {
 func (t *screen) drawAgents(sb *strings.Builder, f frame) {
 	for i, r := range t.agentRows(f.agentN) {
 		row := f.agentRow + i
-		plain, hover := agentLine(r, false, f.boxWidth), agentLine(r, true, f.boxWidth)
+		selected := t.barFocus && i == t.barSel
+		plain, hover := agentLine(r, false, selected, f.boxWidth), agentLine(r, true, selected, f.boxWidth)
 		fmt.Fprintf(sb, "\033[%d;1H%s%s%s", row, bgScreen, truncateVis(plain, f.boxWidth), escClearLine)
 		region := &hitRegion{row: row, col: 1, width: f.boxWidth, height: 1, id: "agent:" + r.kind + r.id, plain: plain, hover: hover}
 		id := r.id

@@ -180,6 +180,9 @@ type screen struct {
 	// pendingTaskID is a sub-agent a click asked to inspect: the key loop opens
 	// its conversation dialog.
 	pendingTaskID string
+	// barFocus/barSel: the agents bar row picked with the arrow keys.
+	barFocus bool
+	barSel   int
 	// mcpOpen is the sidebar's MCP collapse state (open by default).
 	mcpOpen bool
 	// wasHome is whether the last frame was the home screen.
@@ -1946,6 +1949,11 @@ func runScreen(io IO) int {
 					continue
 				}
 				if strings.TrimSpace(t.editor().Text()) == "" {
+					if t.barOpen() {
+						t.drawLocked()
+						t.mu.Unlock()
+						continue
+					}
 					// Empty Enter: while a turn runs it promotes the first queued
 					// prompt to a steer; after an interrupt it resumes the queue.
 					switch {
@@ -2173,6 +2181,13 @@ func runScreen(io IO) int {
 				t.mu.Unlock()
 				command("/effort " + nextEffort(cur))
 			case keyEsc:
+				t.mu.Lock()
+				focused := t.barFocus
+				t.mu.Unlock()
+				if focused {
+					edit(func() { t.barFocus = false })
+					continue
+				}
 				// A selection cancels itself on Esc before any other action,
 				// as OpenCode does.
 				t.mu.Lock()
@@ -2236,7 +2251,7 @@ func runScreen(io IO) int {
 				output <- "/exit"
 			default:
 				edit(func() {
-					if t.editKey(name) {
+					if t.barKey(name) || t.editKey(name) {
 						return
 					}
 					if k.action == "" && k.text != "" {
