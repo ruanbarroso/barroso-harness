@@ -24,6 +24,7 @@ import (
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
 	"github.com/ruanbarroso/barroso-harness/internal/store"
 	"github.com/ruanbarroso/barroso-harness/internal/subagent"
+	"github.com/ruanbarroso/barroso-harness/internal/tools"
 )
 
 // Theme colours the overlays use (spec §0).
@@ -71,6 +72,8 @@ type dialog struct {
 	// dialog the key/mouse model opens stays a read-only text panel.
 	taskID    string
 	taskLines int
+	// jobID marks the live output of a background shell job (x stops it).
+	jobID string
 	// input is the message typed to the sub-agent of an open inspector.
 	input []rune
 	// tsel is the mouse selection over a text body; tselDrag is true while the
@@ -106,6 +109,8 @@ type dialogSource struct {
 	cwd     string
 	// steer delivers a message into the running turn (Session.AddSteer).
 	steer func(runtime.Steer)
+	// jobs are the background shell jobs listed in the agents bar.
+	jobs *tools.JobSet
 }
 
 func (s *dialogSource) update(cfg config.Config, sessID string) {
@@ -571,6 +576,10 @@ func (t *screen) dialogKey(k keyEvent) string {
 	if d.text != nil && d.taskID != "" {
 		return t.chatKey(d, k, name)
 	}
+	if d.text != nil && d.jobID != "" && name == "x" {
+		t.src.stopShell(d.jobID)
+		return ""
+	}
 	if d.text != nil {
 		switch name {
 		case keyUp, "ctrl+p", "k":
@@ -732,6 +741,9 @@ func (t *screen) drawDialog(sb *strings.Builder) (int, int) {
 	d := t.dlg
 	if d.taskID != "" {
 		t.updateSubagentDialog(d)
+	}
+	if d.jobID != "" {
+		t.updateShellDialog(d)
 	}
 	width := min(d.size, t.w-2)
 	left := (t.w-width)/2 + 1

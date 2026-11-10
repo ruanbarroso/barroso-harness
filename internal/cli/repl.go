@@ -497,7 +497,7 @@ func repl(io IO, cfg *config.Config) {
 	// through this handle; it is refreshed before every prompt.
 	var src *dialogSource
 	if io.screen != nil {
-		src = &dialogSource{db: db, gerente: wired.Gerente(), cwd: cwd, steer: sess.AddSteer}
+		src = &dialogSource{db: db, gerente: wired.Gerente(), jobs: wired.Jobs(), cwd: cwd, steer: sess.AddSteer}
 		io.screen.bindSource(src)
 	}
 

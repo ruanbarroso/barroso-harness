@@ -1059,6 +1059,13 @@ func (t *screen) footerParts(w int) (string, string) {
 		}
 		left += "  " + grayf("ctrl+x a ") + color(colorText, label)
 	}
+	if n := len(t.src.shells()); n > 0 {
+		label := fmt.Sprintf("%d shell", n)
+		if n > 1 {
+			label += "s"
+		}
+		left += "  " + color(colorText, label)
+	}
 	// OpenCode's fit rule: available = (W-8) - min(28, (W-8)/2).
 	available := max(0, w-8-min(28, (w-8)/2))
 	hint := boldf(color(colorText, footerCopyHint)) + " " + grayf("commands")
