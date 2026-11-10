@@ -34,6 +34,7 @@ const (
 	CodInterno      = -32603 // internal error
 	CodTurnoRodando = -32001 // agent: a turn is already in flight in this session
 	CodErroAgente   = -32000 // agent: turn failure / cancellation
+	CodTransitorio  = -32002 // agent: session exists but could not be read now (db lock); retry the same id
 )
 
 // Request is a message with an id: it requires a response.

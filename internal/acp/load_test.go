@@ -3,12 +3,14 @@ package acp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
 	"github.com/ruanbarroso/barroso-harness/internal/config"
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
 	"github.com/ruanbarroso/barroso-harness/internal/runtime"
+	"github.com/ruanbarroso/barroso-harness/internal/store"
 )
 
 // turnWithHistory is a Turno that also exposes History — what session/load
@@ -194,5 +196,18 @@ func TestSessionResumeReplaysHistoryLikeLoad(t *testing.T) {
 	resp := ls[4]
 	if resp.Error != nil || string(resp.ID) != "9" {
 		t.Fatalf("unexpected final response: %+v", resp)
+	}
+}
+
+// A db lock must NOT look like a missing session: the connector falls back to
+// session/new on -32602 and overwrites the conversation's session (amnesia).
+func TestSessionLoadTransientFailureHasDistinctCode(t *testing.T) {
+	h := setupWithLoader(t, func(config.Config, string) (Turno, error) {
+		return nil, fmt.Errorf("%w: database is locked", store.ErrTransitorio)
+	})
+	h.send(t, MetLoad, 1, map[string]any{"sessionId": "bh-busy"})
+	ls := waitLines(t, h.out, 1)
+	if ls[0].Error == nil || ls[0].Error.Code != CodTransitorio {
+		t.Fatalf("expected %d, got %+v", CodTransitorio, ls[0])
 	}
 }
