@@ -106,6 +106,9 @@ func printTaskConversation(out io.Writer, events []subagent.Evento) {
 		case subagent.EventoPensamento:
 			fmt.Fprintln(out, dimf("+ Thought"), dimf("· "+e.Duracao.Round(100*time.Millisecond).String()))
 			printIndented(out, e.Texto, "  ")
+		case subagent.EventoUsuario:
+			fmt.Fprintln(out, dimf("> You"))
+			printIndented(out, e.Texto, "  ")
 		case subagent.EventoNota:
 			printIndented(out, e.Texto, "  ")
 		case subagent.EventoToolCall:

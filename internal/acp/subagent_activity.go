@@ -39,6 +39,10 @@ func (a *Agente) AvisarAtividadeSubagente(sessionID, taskID string, event subage
 		} else {
 			r.ToolTerminou(event.ID, event.Nome, event.Args, event.Texto, event.Duracao, event.Erro)
 		}
+	case subagent.EventoUsuario:
+		// The user's message to the child, tagged so the client routes it to the
+		// child transcript (it must NOT land in the parent's conversation).
+		r.emitTagged("user", "agent_message_chunk", textContent(event.Texto))
 	case subagent.EventoSistema:
 		r.emitTagged("system", "agent_message_chunk", textContent(event.Texto))
 	}

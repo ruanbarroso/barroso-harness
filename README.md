@@ -56,7 +56,7 @@ In-session commands:
 /update                downloads and installs the newest release from the channel
 /skills                lists the skills; /<name> [args] runs one
 /tasks                 lists the sub-agents; in the full-screen TUI (also ctrl+x a) choosing one opens its live conversation
-                       (thoughts, tool calls and output, final answer; tab switches, j/k/pgup/pgdn scroll);
+                       (thoughts, tool calls and output, final answer; type and press Enter to message the sub-agent; tab switches, up/down/pgup/pgdn scroll, drag selects and copies);
                        /tasks <id> prints it, /tasks cancel <id> cancels
 /context               active compaction policy and what each one has done
 /help
@@ -228,7 +228,7 @@ Keys: `Enter` sends · `↑`/`↓` history of what you typed · mouse wheel and 
 
 The session name appears in the terminal tab (`BH | <name>`) and in the panel: it is the first message, or whatever you set with `/rename new name`.
 
-With the mouse wheel captured, selecting text to copy is `Shift` + drag (Windows Terminal and most terminals).
+Links (http/https) are drawn in blue and underlined, and `Ctrl`+click opens them in the browser. Dragging over the conversation or over a sub-agent conversation selects and copies on release; with the mouse wheel captured, selecting anything else is `Shift` + drag (Windows Terminal and most terminals).
 
 The iSH build (linux/386, iPhone/iPad) always uses scrolling mode, since iSH sends no mouse wheel events; every other build always uses full screen. Pipes, redirection and `bh -p` never use full screen.
 
