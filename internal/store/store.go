@@ -25,8 +25,35 @@ import (
 	"time"
 
 	// Pure-Go driver (no CGO): registers the "sqlite" name in database/sql.
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
 )
+
+// Open retries when SQLite reports a lock condition. busy_timeout covers a
+// plain SQLITE_BUSY, but not SQLITE_BUSY_RECOVERY (261, another process is
+// running WAL recovery), which was seen in production when several `bh -acp`
+// processes opened the same sessions.db at once: Open failed, the caller fell
+// back to "session not persisted" and the conversation lost its history.
+const (
+	openAttempts  = 5
+	openWaitFirst = 50 * time.Millisecond
+	openWaitMax   = 800 * time.Millisecond
+)
+
+// isLockErr reports whether err is a transient lock error from SQLite: the
+// primary result code is SQLITE_BUSY (5), SQLITE_LOCKED (6) or SQLITE_PROTOCOL
+// (15), which also covers extended codes such as BUSY_RECOVERY (261),
+// BUSY_SNAPSHOT (517) and LOCKED_SHAREDCACHE (262).
+func isLockErr(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.Code() & 0xff {
+	case 5, 6, 15:
+		return true
+	}
+	return false
+}
 
 //go:embed schema.sql
 var sqlSchema string
@@ -112,6 +139,28 @@ func Open(path string) (*Store, error) {
 		return s, nil
 	}
 	dsn := "file:" + filepath.ToSlash(abs) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	wait := openWaitFirst
+	var st *Store
+	for attempt := 1; ; attempt++ {
+		st, err = openOnce(abs, dsn)
+		if err == nil {
+			break
+		}
+		if attempt >= openAttempts || !isLockErr(err) {
+			return nil, err
+		}
+		time.Sleep(wait)
+		if wait *= 2; wait > openWaitMax {
+			wait = openWaitMax
+		}
+	}
+	registry[abs] = st
+	return st, nil
+}
+
+// openOnce is one open attempt: connect, ping and apply the schema. On any
+// failure the connection is closed, so a retry starts clean.
+func openOnce(abs, dsn string) (*Store, error) {
 	db, err := sql.Open(NomeDriver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", abs, err)
@@ -129,7 +178,6 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	registry[abs] = st
 	return st, nil
 }
 
