@@ -35,3 +35,12 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_seq
     ON events(session_id, seq);
+
+-- Bookkeeping of the legacy migration (only present in files that were copied
+-- from the old shared sessions.db): the highest legacy seq already copied and
+-- the title as the legacy database had it. They let a later open pick up
+-- events an older `bh` process wrote to the legacy database after the copy.
+CREATE TABLE IF NOT EXISTS meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);

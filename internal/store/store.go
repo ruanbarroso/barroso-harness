@@ -35,13 +35,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// Pure-Go driver (no CGO): registers the "sqlite" name in database/sql.
@@ -156,6 +159,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("store: create %s: %w", d, err)
 		}
 	}
+	st.sweepOrphans()
 	registry[abs] = st
 	return st, nil
 }
@@ -279,6 +283,13 @@ func (s *Store) sessionDB(id string, create bool) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Pick up what an older bh wrote to the legacy file after the copy. If
+	// that cannot be done now (lock), the session is not cached and the error
+	// is transient: the next call tries again, nothing is skipped.
+	if err := s.syncLegacyTail(id, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	s.dbs[id] = db
 	return db, nil
 }
@@ -306,60 +317,192 @@ func (s *Store) legacy() *sql.DB {
 	return db
 }
 
-// migrateLegacy copies a session from the legacy database into its own file.
-// It reports whether the session existed there. The copy is built in a temp
-// file and published with a hard link, so a reader never sees a half-copied
-// session and two processes migrating the same id cannot clobber each other.
+// orphanAge: a migration temp file untouched for this long belongs to a
+// process that died; a live copy keeps writing to its file.
+const orphanAge = 15 * time.Minute
+
+// tmpSeq makes temp names unique inside one process (clock resolution is not
+// enough: two goroutines can read the same instant).
+var tmpSeq atomic.Uint64
+
+// Keys of the meta table written by the migration.
+const (
+	metaSyncedSeq = "legacy_synced_seq"
+	metaTitle     = "legacy_title"
+)
+
+// dsnTmp: the migration copy is built in rollback-journal mode, so the file is
+// self-contained the moment the transaction commits (no -wal to forget).
+func dsnTmp(path string) string {
+	return "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(" + busyTimeoutStr + ")&_pragma=journal_mode(DELETE)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)"
+}
+
+// noSuchTable: a legacy file without our tables holds no sessions. Any other
+// failure reading it is NOT "absent": treating it so would create an empty
+// session under an id that exists, hiding its history.
+func noSuchTable(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")
+}
+
+// evDigest fingerprints an event stream (seq, ts, kind, payload, in order) so
+// the copy can be compared with its source without keeping either in memory.
+type evDigest struct {
+	h      hash.Hash
+	n, max int
+}
+
+func newDigest() *evDigest { return &evDigest{h: sha256.New()} }
+
+func (d *evDigest) add(e Event) {
+	fmt.Fprintf(d.h, "%d\x00%s\x00%s\x00%d\x00%s\x00", e.Seq, e.Ts, e.Kind, len(e.Payload), e.Payload)
+	d.n++
+	d.max = e.Seq
+}
+
+func (d *evDigest) sum() string { return hex.EncodeToString(d.h.Sum(nil)) }
+
+// sweepOrphans removes leftovers of migrations whose process died (temp files
+// and their sidecars) and of interrupted blob writes. Best effort.
+func (s *Store) sweepOrphans() {
+	cut := time.Now().Add(-orphanAge)
+	if entries, err := os.ReadDir(s.sessDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.Contains(e.Name(), ".migrating-") {
+				continue
+			}
+			if info, err := e.Info(); err == nil && info.ModTime().Before(cut) {
+				_ = os.Remove(filepath.Join(s.sessDir, e.Name()))
+			}
+		}
+	}
+	blobCut := time.Now().Add(-time.Hour)
+	dirs, err := os.ReadDir(s.blobsDir)
+	if err != nil {
+		return
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		sub := filepath.Join(s.blobsDir, d.Name())
+		files, err := os.ReadDir(sub)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if !strings.HasPrefix(f.Name(), ".tmp-") {
+				continue
+			}
+			if info, err := f.Info(); err == nil && info.ModTime().Before(blobCut) {
+				_ = os.Remove(filepath.Join(sub, f.Name()))
+			}
+		}
+	}
+}
+
+// migrateLegacy copies a session from the legacy database into its own file
+// and reports whether the session existed there.
+//
+//   - The source is read inside ONE read transaction (a snapshot), so the copy
+//     is consistent even if an older bh process is writing to the legacy file.
+//   - The copy is built in a temp file, read back from disk and compared with
+//     the source (event count, last seq, SHA-256 of every event) BEFORE it is
+//     published. A copy that does not match is discarded, never published.
+//   - It is published with a hard link: a reader never sees a half-copied
+//     session and two processes migrating the same id cannot clobber each
+//     other (the loser's copy is discarded).
+//   - Whatever the legacy database receives after the snapshot is picked up
+//     by syncLegacyTail the next time the session is opened.
 func (s *Store) migrateLegacy(id, file string) (bool, error) {
 	leg := s.legacy()
 	if leg == nil {
 		return false, nil
 	}
-	var se Session
-	var meta string
-	err := retryErr(func() error {
-		return leg.QueryRow(`SELECT id, created_at, updated_at, title, metadata_json FROM sessions WHERE id = ?`, id).
-			Scan(&se.ID, &se.CreatedAt, &se.UpdatedAt, &se.Title, &meta)
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		// A table-less or unreadable legacy file counts as "not there"; a
-		// lock must stay a lock so the caller can retry.
-		if transitório(err) {
-			return false, fmt.Errorf("store: legacy session %s: %w", id, err)
+	tmp := fmt.Sprintf("%s.migrating-%d-%d", file, os.Getpid(), tmpSeq.Add(1))
+	removeTmp := func() {
+		for _, suf := range []string{"", "-journal", "-wal", "-shm"} {
+			_ = os.Remove(tmp + suf)
 		}
-		return false, nil
 	}
+	defer removeTmp()
 
-	tmp := fmt.Sprintf("%s.migrating-%d", file, os.Getpid())
-	_ = os.Remove(tmp)
-	_ = os.Remove(tmp + "-wal")
-	_ = os.Remove(tmp + "-shm")
-	defer func() {
-		_ = os.Remove(tmp)
-		_ = os.Remove(tmp + "-wal")
-		_ = os.Remove(tmp + "-shm")
-	}()
-	if err := s.copyToTemp(leg, tmp, se, meta); err != nil {
+	var (
+		found bool
+		se    Session
+		blobs []string
+	)
+	err := retryErr(func() error {
+		removeTmp()
+		var e error
+		found, se, blobs, e = s.copySession(leg, tmp, id)
+		return e
+	})
+	if err != nil {
 		return false, err
+	}
+	if !found {
+		return false, nil
 	}
 	// Keep the file's mtime equal to the session's last use: ListSessions
 	// uses it to pick which files to read.
 	if t, err := time.Parse(TsFormato, se.UpdatedAt); err == nil {
 		_ = os.Chtimes(tmp, t, t)
 	}
-	if err := os.Link(tmp, file); err != nil && !errors.Is(err, fs.ErrExist) {
-		return false, fmt.Errorf("store: publish %s: %w", file, err)
+	if err := publish(tmp, file); err != nil {
+		return false, err
 	}
+	s.copyBlobs(leg, blobs)
 	return true, nil
 }
 
-func (s *Store) copyToTemp(leg *sql.DB, tmp string, se Session, meta string) error {
-	db, err := sql.Open(NomeDriver, dsnRW(tmp))
+// publish makes tmp appear as file atomically, without replacing a file that
+// is already there.
+func publish(tmp, file string) error {
+	err := os.Link(tmp, file)
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	// A filesystem without hard links: fall back to rename, never over an
+	// existing file.
+	if _, serr := os.Stat(file); serr == nil {
+		return nil
+	}
+	if rerr := os.Rename(tmp, file); rerr != nil {
+		return fmt.Errorf("store: publish %s: %w", file, err)
+	}
+	return nil
+}
+
+// copySession builds the verified copy of one legacy session at tmp.
+func (s *Store) copySession(leg *sql.DB, tmp, id string) (bool, Session, []string, error) {
+	var se Session
+	fail := func(format string, a ...any) (bool, Session, []string, error) {
+		return false, se, nil, fmt.Errorf(format, a...)
+	}
+	ltx, err := leg.Begin()
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", se.ID, err)
+		return fail("store: legacy session %s: %w", id, err)
+	}
+	defer func() { _ = ltx.Rollback() }()
+
+	var meta string
+	err = ltx.QueryRow(`SELECT id, created_at, updated_at, title, metadata_json FROM sessions WHERE id = ?`, id).
+		Scan(&se.ID, &se.CreatedAt, &se.UpdatedAt, &se.Title, &meta)
+	if errors.Is(err, sql.ErrNoRows) || noSuchTable(err) {
+		return false, se, nil, nil
+	}
+	if err != nil {
+		return fail("store: legacy session %s: %w", id, err)
+	}
+	rows, err := ltx.Query(`SELECT seq, session_id, ts, kind, payload_json FROM events WHERE session_id = ? ORDER BY seq ASC`, id)
+	if err != nil {
+		return fail("store: migrate %s: read events: %w", id, err)
+	}
+	defer rows.Close()
+
+	db, err := sql.Open(NomeDriver, dsnTmp(tmp))
+	if err != nil {
+		return fail("store: migrate %s: %w", id, err)
 	}
 	db.SetMaxOpenConns(1)
 	closed := false
@@ -369,48 +512,298 @@ func (s *Store) copyToTemp(leg *sql.DB, tmp string, se Session, meta string) err
 		}
 	}()
 	if _, err := db.Exec(sqlSchema); err != nil {
-		return fmt.Errorf("store: migrate %s: schema: %w", se.ID, err)
+		return fail("store: migrate %s: schema: %w", id, err)
 	}
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", se.ID, err)
+		return fail("store: migrate %s: %w", id, err)
 	}
 	if _, err := tx.Exec(`INSERT INTO sessions (id, created_at, updated_at, title, metadata_json) VALUES (?, ?, ?, ?, ?)`,
 		se.ID, se.CreatedAt, se.UpdatedAt, se.Title, meta); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("store: migrate %s: %w", se.ID, err)
+		return fail("store: migrate %s: %w", id, err)
 	}
-	rows, err := leg.Query(`SELECT seq, session_id, ts, kind, payload_json FROM events WHERE session_id = ? ORDER BY seq ASC`, se.ID)
-	if err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("store: migrate %s: read events: %w", se.ID, err)
-	}
+	src := newDigest()
+	seen := map[string]bool{}
+	var blobs []string
 	for rows.Next() {
 		var e Event
 		if err := rows.Scan(&e.Seq, &e.Session, &e.Ts, &e.Kind, &e.Payload); err != nil {
-			_ = rows.Close()
 			_ = tx.Rollback()
-			return fmt.Errorf("store: migrate %s: read event: %w", se.ID, err)
+			return fail("store: migrate %s: read event: %w", id, err)
 		}
 		if _, err := tx.Exec(`INSERT INTO events (seq, session_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)`,
 			e.Seq, e.Session, e.Ts, e.Kind, e.Payload); err != nil {
-			_ = rows.Close()
 			_ = tx.Rollback()
-			return fmt.Errorf("store: migrate %s: write event: %w", se.ID, err)
+			return fail("store: migrate %s: write event: %w", id, err)
+		}
+		src.add(e)
+		if strings.Contains(e.Payload, `"blob"`) {
+			var p struct {
+				Blob string `json:"blob"`
+			}
+			if json.Unmarshal([]byte(e.Payload), &p) == nil && p.Blob != "" && !seen[p.Blob] {
+				seen[p.Blob] = true
+				blobs = append(blobs, p.Blob)
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		_ = tx.Rollback()
-		return fmt.Errorf("store: migrate %s: iterate events: %w", se.ID, err)
+		return fail("store: migrate %s: iterate events: %w", id, err)
 	}
-	_ = rows.Close()
+	for k, v := range map[string]string{metaSyncedSeq: strconv.Itoa(src.max), metaTitle: se.Title} {
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)`, k, v); err != nil {
+			_ = tx.Rollback()
+			return fail("store: migrate %s: meta: %w", id, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: migrate %s: commit: %w", se.ID, err)
+		return fail("store: migrate %s: commit: %w", id, err)
 	}
-	// Closing the last connection checkpoints the WAL into the main file.
 	closed = true
-	return db.Close()
+	if err := db.Close(); err != nil {
+		return fail("store: migrate %s: close: %w", id, err)
+	}
+	if err := verifyCopy(tmp, se, meta, src); err != nil {
+		return fail("store: migrate %s: verification failed, copy discarded: %w", id, err)
+	}
+	return true, se, blobs, nil
+}
+
+// verifyCopy reopens the finished temp file read-only and compares it with
+// what was read from the legacy database.
+func verifyCopy(tmp string, want Session, wantMeta string, src *evDigest) error {
+	db, err := sql.Open(NomeDriver, dsnRO(tmp))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var chk string
+	if err := db.QueryRow(`PRAGMA quick_check`).Scan(&chk); err != nil {
+		return err
+	}
+	if chk != "ok" {
+		return fmt.Errorf("integrity check: %s", chk)
+	}
+	var got Session
+	var gotMeta string
+	if err := db.QueryRow(`SELECT id, created_at, updated_at, title, metadata_json FROM sessions`).
+		Scan(&got.ID, &got.CreatedAt, &got.UpdatedAt, &got.Title, &gotMeta); err != nil {
+		return fmt.Errorf("session row: %w", err)
+	}
+	if got != want || gotMeta != wantMeta {
+		return fmt.Errorf("session row differs")
+	}
+	rows, err := db.Query(`SELECT seq, session_id, ts, kind, payload_json FROM events ORDER BY seq ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	dst := newDigest()
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.Seq, &e.Session, &e.Ts, &e.Kind, &e.Payload); err != nil {
+			return err
+		}
+		dst.add(e)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if dst.n != src.n || dst.max != src.max || dst.sum() != src.sum() {
+		return fmt.Errorf("events differ: copy has %d (last seq %d), source %d (last seq %d)", dst.n, dst.max, src.n, src.max)
+	}
+	return nil
+}
+
+// copyBlobs brings the blobs referenced by a migrated session into the blobs
+// directory, so the session no longer depends on the legacy file. Best effort:
+// a blob that cannot be copied stays readable from the legacy table (GetBlob
+// falls back to it). Content is only written under the hash it matches.
+func (s *Store) copyBlobs(leg *sql.DB, hashes []string) {
+	for _, h := range hashes {
+		if !isHash(h) {
+			continue
+		}
+		if _, err := os.Stat(s.blobPath(h)); err == nil {
+			continue
+		}
+		var b []byte
+		err := retryErr(func() error { return leg.QueryRow(`SELECT data FROM blobs WHERE hash = ?`, h).Scan(&b) })
+		if err != nil || len(b) == 0 || sha256Hex(b) != h {
+			continue
+		}
+		_ = s.writeBlob(h, b)
+	}
+}
+
+// syncLegacyTail picks up what an older bh process wrote to the legacy
+// database for a session that was already migrated: events past the last seq
+// copied, a newer updated_at and a title changed there. It runs when a session
+// is opened. Nothing is lost and nothing is duplicated: the copied position is
+// advanced in the same transaction that inserts the events, and re-read inside
+// it, so concurrent processes cannot apply the same tail twice.
+//
+// A tail event keeps its legacy seq when that is past the end of the file's
+// log (legacy seqs are global, so it normally is); otherwise it gets the next
+// free seq. Either way log order is the order the events were written.
+func (s *Store) syncLegacyTail(id string, db *sql.DB) error {
+	synced, legTitle, ok, err := readSyncMeta(db)
+	if err != nil {
+		return fmt.Errorf("store: sync %s: %w", id, err)
+	}
+	if !ok {
+		return nil // not a migrated session
+	}
+	leg := s.legacy()
+	if leg == nil {
+		return nil
+	}
+	var (
+		tail []Event
+		lse  Session
+		have bool
+	)
+	err = retryErr(func() error {
+		tail, have = nil, false
+		ltx, err := leg.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = ltx.Rollback() }()
+		err = ltx.QueryRow(`SELECT id, created_at, updated_at, title FROM sessions WHERE id = ?`, id).
+			Scan(&lse.ID, &lse.CreatedAt, &lse.UpdatedAt, &lse.Title)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		have = true
+		rows, err := ltx.Query(`SELECT seq, session_id, ts, kind, payload_json FROM events WHERE session_id = ? AND seq > ? ORDER BY seq ASC`, id, synced)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e Event
+			if err := rows.Scan(&e.Seq, &e.Session, &e.Ts, &e.Kind, &e.Payload); err != nil {
+				return err
+			}
+			tail = append(tail, e)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		if transitório(err) {
+			return fmt.Errorf("store: sync %s from legacy: %w", id, err)
+		}
+		return nil // legacy unreadable for good: the verified copy stands
+	}
+	if !have {
+		return nil
+	}
+	var own Session
+	if err := db.QueryRow(`SELECT id, created_at, updated_at, title FROM sessions WHERE id = ?`, id).
+		Scan(&own.ID, &own.CreatedAt, &own.UpdatedAt, &own.Title); err != nil {
+		return fmt.Errorf("store: sync %s: %w", id, err)
+	}
+	newTitle := lse.Title != legTitle && own.Title == legTitle
+	newTime := lse.UpdatedAt > own.UpdatedAt
+	if len(tail) == 0 && !newTitle && !newTime {
+		return nil
+	}
+	return retryErr(func() error {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		// A write first, so the lock is taken up front (busy timeout applies)
+		// and the position below cannot change under us.
+		if _, err := tx.Exec(`UPDATE meta SET value = value WHERE key = ?`, metaSyncedSeq); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		var cur string
+		if err := tx.QueryRow(`SELECT value FROM meta WHERE key = ?`, metaSyncedSeq).Scan(&cur); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		pos, _ := strconv.Atoi(cur)
+		var maxOwn int
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&maxOwn); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		for _, e := range tail {
+			if e.Seq <= pos {
+				continue // another process already applied it
+			}
+			if e.Seq > maxOwn {
+				if _, err := tx.Exec(`INSERT INTO events (seq, session_id, ts, kind, payload_json) VALUES (?, ?, ?, ?, ?)`,
+					e.Seq, id, e.Ts, e.Kind, e.Payload); err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				maxOwn = e.Seq
+			} else {
+				res, err := tx.Exec(`INSERT INTO events (session_id, ts, kind, payload_json) VALUES (?, ?, ?, ?)`,
+					id, e.Ts, e.Kind, e.Payload)
+				if err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				n, _ := res.LastInsertId()
+				maxOwn = int(n)
+			}
+			pos = e.Seq
+		}
+		if _, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = ?`, strconv.Itoa(pos), metaSyncedSeq); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if newTime {
+			if _, err := tx.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ? AND updated_at < ?`, lse.UpdatedAt, id, lse.UpdatedAt); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if newTitle {
+			if _, err := tx.Exec(`UPDATE sessions SET title = ? WHERE id = ? AND title = ?`, lse.Title, id, legTitle); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = ?`, lse.Title, metaTitle); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+func readSyncMeta(db *sql.DB) (synced int, title string, ok bool, err error) {
+	rows, err := db.Query(`SELECT key, value FROM meta WHERE key IN (?, ?)`, metaSyncedSeq, metaTitle)
+	if err != nil {
+		return 0, "", false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return 0, "", false, err
+		}
+		switch k {
+		case metaSyncedSeq:
+			synced, _ = strconv.Atoi(v)
+			ok = true
+		case metaTitle:
+			title = v
+		}
+	}
+	return synced, title, ok, rows.Err()
 }
 
 // ── deterministic serialization ───────────────────────────────────────────
@@ -858,12 +1251,21 @@ func (s *Store) PutBlob(data []byte) (map[string]any, error) {
 	if info, err := os.Stat(dst); err == nil && info.Size() == int64(len(data)) {
 		return ref, nil
 	}
+	if err := s.writeBlob(sum, data); err != nil {
+		return nil, err
+	}
+	return ref, nil
+}
+
+// writeBlob writes the content under its hash through a temp file + rename.
+func (s *Store) writeBlob(sum string, data []byte) error {
+	dst := s.blobPath(sum)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return nil, fmt.Errorf("store: write blob: %w", err)
+		return fmt.Errorf("store: write blob: %w", err)
 	}
 	f, err := os.CreateTemp(filepath.Dir(dst), ".tmp-"+sum[:8]+"-*")
 	if err != nil {
-		return nil, fmt.Errorf("store: write blob: %w", err)
+		return fmt.Errorf("store: write blob: %w", err)
 	}
 	tmp := f.Name()
 	_, werr := f.Write(data)
@@ -875,13 +1277,13 @@ func (s *Store) PutBlob(data []byte) (map[string]any, error) {
 	}
 	if werr != nil {
 		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("store: write blob: %w", werr)
+		return fmt.Errorf("store: write blob: %w", werr)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("store: write blob: %w", err)
+		return fmt.Errorf("store: write blob: %w", err)
 	}
-	return ref, nil
+	return nil
 }
 
 // GetBlob returns the content for a hash: the blob file, or else the legacy
