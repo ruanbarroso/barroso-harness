@@ -4,6 +4,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -895,8 +897,15 @@ func weightToolProvider(t *testing.T, rounds int) *httptest.Server {
 }
 
 func weightTool() tools.Spec {
+	// The output embeds the request's own counter, so each round is a DIFFERENT
+	// outcome: this test is about the window guardrail, not the loop guard.
 	return tools.Spec{Name: "weight", Schema: map[string]any{"type": "object"},
-		Exec: func(context.Context, string, json.RawMessage) (string, error) { return "heavy done", nil }}
+		Exec: func(ctx context.Context, _ string, raw json.RawMessage) (string, error) {
+			var in struct{ Content string }
+			_ = json.Unmarshal(raw, &in)
+			h := sha256.Sum256([]byte(in.Content))
+			return "heavy done " + hex.EncodeToString(h[:4]), nil
+		}}
 }
 
 // Regression (conversation 104129, session bh-20261028013103-4583, 2026-10-28):

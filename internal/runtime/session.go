@@ -441,6 +441,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		loop.tick()
 		// Catalog rebuilt on EVERY cycle: mcp_add, mcp_remove and skill_create
 		// change the tools mid-turn, and the next round must already see them.
 		// Built only once, a freshly connected tool stayed invisible until the
@@ -910,6 +911,19 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		for _, out := range s.runRound(ctx, r, list, cwd, round.Tools) {
 			results = append(results, dealer.Mensagem{Role: "tool_result", Conteudo: out.output, ToolID: out.call.ID, ToolName: out.call.Nome, IsErro: out.isErr})
 		}
+		// The loop guard compares outcomes, not arguments: Bruce spent 18
+		// minutes on 154 shell calls whose outputs were identical even though
+		// the arguments were spelled differently (`tail -4` vs `tail -n 4`).
+		// It runs BEFORE the round joins the transcript so a blocked round can
+		// carry a refusal instead of the repeated output (the call/result
+		// pairing stays valid for every provider).
+		notice, verdict := loop.observe(round.Tools, results)
+		if verdict >= loopVerdictBlock {
+			for i := range results {
+				results[i].Conteudo = blockedError(notice)
+				results[i].IsErro = true
+			}
+		}
 		working = append(working, turn...)
 		working = append(working, results...)
 		// Images opened with read reach the model as images: the tool result
@@ -919,12 +933,21 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 			working = append(working, dealer.Mensagem{Role: "user", Conteudo: readImagesNote, Images: imgs})
 			s.record("user_message", map[string]any{"role": "user", "content": readImagesNote, "images": imgs})
 		}
-		if notice := loop.observe(round.Tools); notice != "" {
-			// A nudge, not a stop: the turn keeps going, but the model is told it
-			// is repeating itself (Gemini CLI stops at 5 identical calls in a row;
-			// BH prefers to keep working and steer).
+		// Warn steers, block refused the repeats above, stop ends the turn.
+		switch verdict {
+		case loopContinue:
+		case loopVerdictWarn:
 			working = append(working, dealer.Mensagem{Role: "user", Conteudo: notice})
 			s.record("user_message", map[string]any{"role": "user", "content": notice})
+		case loopVerdictBlock:
+			working = append(working, dealer.Mensagem{Role: "user", Conteudo: notice})
+			s.record("user_message", map[string]any{"role": "user", "content": notice})
+			s.record("loop_block", map[string]any{"cycle": cycle, "rounds": loop.count, "tools": names(round.Tools)})
+		case loopVerdictStop:
+			working = append(working, dealer.Mensagem{Role: "user", Conteudo: notice})
+			s.record("user_message", map[string]any{"role": "user", "content": notice})
+			s.record("loop_stop", map[string]any{"cycle": cycle, "rounds": loop.count, "tools": names(round.Tools)})
+			return fmt.Errorf("loop guard: the turn was stopped after %d rounds with identical tool results (%s); the conversation is kept, send a new message to continue", loop.count, strings.Join(names(round.Tools), ", "))
 		}
 		if state := compactedState(round.Tools, results); state != "" {
 			before := historyBytes(working)
@@ -934,6 +957,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 			floor = 0 // the history changed shape; pruning restarts from the beginning
 			compacted = true
 			avisado, desistiu = false, false
+			loop.Compacted()
 			r.Guardrail(true)
 			// Kind and keys kept as originally persisted (see persist.go);
 			// "mantem" tells Resume how to replay it.
@@ -950,6 +974,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		// Safe boundary: the round's calls and results are complete, the next
 		// request has not gone out. Steer messages join the conversation here.
 		for _, m := range s.TakeInbox() {
+			loop.Reset()
 			working = append(working, dealer.Mensagem{Role: "user", Conteudo: m.Text, Images: m.Images})
 			ev := map[string]any{"role": "user", "content": m.Text, "steer": true}
 			if len(m.Images) > 0 {
