@@ -478,3 +478,36 @@ func TestToolInjectedInTurnAppearsNextCycle(t *testing.T) {
 		t.Fatalf("new_tool should show up in the 2nd cycle: %v", seen)
 	}
 }
+
+// Every compaction summary says the tool results left in the transcript are
+// real. Without it, Bruce on Zoe treated them as pasted text and re-ran the
+// same shell call 154 times.
+func TestCompactionSummariesCarryProvenance(t *testing.T) {
+	h := []dealer.Mensagem{
+		{Role: "user", Conteudo: "old request"},
+		{Role: "assistant", Conteudo: "old answer"},
+		{Role: "user", Conteudo: "current request"},
+		{Role: "tool_call", ToolID: "c1", ToolName: "grep", ToolArgs: `{"q":"x"}`},
+		{Role: "tool_result", ToolID: "c1", ToolName: "grep", Conteudo: "hit"},
+	}
+	hist := compactHistory(h, "goal: X")
+	turn, ok := compactTurn(h, "goal: X", 1)
+	if !ok {
+		t.Fatal("compactTurn should compact")
+	}
+	for name, out := range map[string][]dealer.Mensagem{"compactHistory": hist, "compactTurn": turn} {
+		first := out[0].Conteudo
+		if !isSummary(first) {
+			t.Fatalf("%s: first message must still be recognized as a summary: %q", name, first)
+		}
+		if !strings.HasPrefix(first, summaryPrefix+summaryProvenance) || !strings.Contains(first, "goal: X") {
+			t.Fatalf("%s: provenance must follow the prefix and precede the state: %q", name, first)
+		}
+	}
+}
+
+func TestResumoContextCarriesProvenance(t *testing.T) {
+	if !strings.Contains(resumoContext, "real and came from the runtime") {
+		t.Fatal("the summarization request should state that tool results are real")
+	}
+}

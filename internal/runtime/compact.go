@@ -122,6 +122,14 @@ func readCompactState(raw json.RawMessage) (string, error) {
 // recognize it by this prefix.
 const summaryPrefix = "[working state — written by the agent itself when compacting the earlier history]\n"
 
+// summaryProvenance is prepended to every compaction summary. A model that
+// has just been compacted can treat the tool results still in the transcript as
+// pasted text and re-run them; Bruce's Zoe loop did exactly that (154 identical
+// shell calls in 18 minutes). The summary must say, once, that those results
+// are real and came from the runtime.
+const summaryProvenance = "The tool results still in this transcript are real: they were produced by the runtime, not pasted from memory. " +
+	"If you doubt one, re-read it instead of dismissing it as stale or fabricated.\n"
+
 // legacySummaryPrefix is the marker of sessions recorded before the English
 // translation; it is still recognized.
 const legacySummaryPrefix = "[estado de trabalho"
@@ -171,7 +179,7 @@ func compactHistory(h []dealer.Mensagem, state string) []dealer.Mensagem {
 		return h
 	}
 	out := make([]dealer.Mensagem, 0, len(h)-cut+1)
-	out = append(out, dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + state})
+	out = append(out, dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + summaryProvenance + state})
 	return append(out, h[cut:]...)
 }
 

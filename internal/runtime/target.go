@@ -69,7 +69,8 @@ const resumoContext = contextNotePrefix + "The context is over the working targe
 	"Done (what changed and how it was verified); " +
 	"Open (failing tests, unresolved errors, things to check); " +
 	"Next (the exact next action). " +
-	"Dense and concrete beats long: no narration, no pleasantries, no preamble. The harness already keeps the user's requests and the list of files touched.\n"
+	"Dense and concrete beats long: no narration, no pleasantries, no preamble. The harness already keeps the user's requests and the list of files touched. " +
+	"The tool results that stay in the transcript are real and came from the runtime — re-read one if you doubt it, do not dismiss it as stale.\n"
 
 const factsHeader = "## Working facts kept by the harness"
 
@@ -272,7 +273,7 @@ func compactTurn(h []dealer.Mensagem, state string, keep int) ([]dealer.Mensagem
 		a.collect(h[units[0].start:units[drop-1].end])
 		tailStart = units[drop].start
 	}
-	summary := dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + joinState(state, a.texto())}
+	summary := dealer.Mensagem{Role: "user", Conteudo: summaryPrefix + summaryProvenance + joinState(state, a.texto())}
 
 	out := make([]dealer.Mensagem, 0, 3+len(h)-tailStart)
 	out = append(out, summary, h[cut])
