@@ -39,6 +39,12 @@ bh -version
 bh -init
 ```
 
+**Answer-only output.** With `BH_FINAL_ONLY=1` (exactly `1`; any other value is ignored), the plain renderer used by `bh -p` and by the REPL when stdout is a pipe prints only the model's answer on stdout. The `[tool ...]` log lines and the echoed command are dropped. Run notices (`[guardrail]`, `[protocol]`, `[output limit]`) still appear, on stderr, so `bh -p ... > answer.txt` stays clean without hiding problems. The variable is read once when the renderer is created. The TUI and ACP modes are not affected.
+
+```bash
+BH_FINAL_ONLY=1 bh -p "summarize README.md" > summary.txt
+```
+
 In-session commands:
 
 ```text

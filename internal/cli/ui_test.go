@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ruanbarroso/barroso-harness/internal/dealer"
+	"github.com/ruanbarroso/barroso-harness/internal/runtime"
 )
 
 // TestBasicTUITurnGlyphsAndPalette: with colors on, the TUI turn facade emits
@@ -39,6 +40,9 @@ func TestBasicTUITurnGlyphsAndPalette(t *testing.T) {
 }
 
 func TestPlainHasNoEscapes(t *testing.T) {
+	// The plain renderer goes quiet when BH_FINAL_ONLY=1 is exported; this test
+	// needs the default tool log.
+	t.Setenv(runtime.EnvSoResposta, "")
 	prevColors := colorsOn
 	colorsOn = false
 	defer func() { colorsOn = prevColors }()
