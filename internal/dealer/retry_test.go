@@ -3,6 +3,7 @@ package dealer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -67,7 +68,7 @@ func TestSilentProviderGivesUp(t *testing.T) {
 	defer srv.Close()
 	start := time.Now()
 	_, err := chatClient(Config{BaseURL: srv.URL, Model: "m"}).Rodar("sys", nil, nil)
-	if err == nil || !errors.Is(err, errIdle) || !strings.Contains(err.Error(), "gave up after 2 attempts") {
+	if err == nil || !errors.Is(err, errIdle) || !strings.Contains(err.Error(), fmt.Sprintf("gave up after %d attempts", maxTimeoutAttempts)) {
 		t.Fatalf("err %v", err)
 	}
 	if n.Load() != int32(maxTimeoutAttempts) {

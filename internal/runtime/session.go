@@ -39,6 +39,11 @@ type Session struct {
 	store     *store.Store
 	sessionID string
 
+	// conversa is the provider-side conversation identity of a session that
+	// has NO store (a sub-agent's). It only feeds ComConversa: it never makes
+	// the session persistent. A persistent session uses its sessionID.
+	conversa string
+
 	// injected holds the specs of EXTERNAL subsystems (subagents, MCP), added
 	// by the wiring through Injetar. They do not live in the static catalog
 	// because those tools are owned by a process: see extras.go.
@@ -136,6 +141,23 @@ func (s *Session) Attach(st *store.Store, sessionID string) {
 	// No indexing here: the session row is born with the first event
 	// (StoreEvent) or with /rename. Opening and closing bh without talking
 	// leaves no empty session in the database nor in the /resume list.
+}
+
+// DefinirConversa pins the conversation identity the dealer sends to the
+// provider (x-opencode-session / x-session-affinity) for a session without a
+// store. Without it every request of a sub-agent minted a NEW ses_ id, which
+// threw away the provider's prefix cache and the gateway's account affinity
+// on every call and every retry. It does not make the session persistent.
+func (s *Session) DefinirConversa(id string) { s.conversa = strings.TrimSpace(id) }
+
+// conversaID is the identity ComConversa carries: the persistent session id
+// when there is one, else the pinned conversation, else "" (one-shot traffic,
+// which keeps minting a fresh id per call).
+func (s *Session) conversaID() string {
+	if s.sessionID != "" {
+		return s.sessionID
+	}
+	return s.conversa
 }
 
 // ID returns the session id (empty when there is no persistence).
@@ -656,7 +678,7 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		// The conversation identity rides along: the canonical ses_ id
 		// mints once and stays stable for the whole session (one-shot
 		// traffic outside a store keeps a per-call fresh id).
-		cli = cli.ComConversa(s.sessionID)
+		cli = cli.ComConversa(s.conversaID())
 		limit := cli.MaxTokens()
 		if extraLimit > 0 {
 			limit = extraLimit

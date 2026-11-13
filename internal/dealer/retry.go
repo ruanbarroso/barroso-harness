@@ -46,8 +46,13 @@ var (
 	// stream that pings forever without content still trips idleTimeout.
 	maxAttempts = 4
 	// Timeouts get their own small budget: a dead provider must not be able to
-	// hold the turn open for the whole backoff ladder.
-	maxTimeoutAttempts = 2
+	// hold the turn open for the whole backoff ladder. It used to be 2 and that
+	// is what bit a turn on 13/11 (a sub-agent of three died with "gave up after
+	// 2 attempts in 5m2s"): the gateway answered some requests 60-90 s after the
+	// first silent attempt was abandoned, and there was no attempt left to
+	// collect them. Three bounds the wait at ~15 min instead of ~10 min, with
+	// the idle deadline unchanged (300 s per attempt).
+	maxTimeoutAttempts = 3
 	backoffBase        = 2 * time.Second
 	backoffMax         = 30 * time.Second
 	retryAfterMx       = 60 * time.Second

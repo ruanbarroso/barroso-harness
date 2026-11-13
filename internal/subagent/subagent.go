@@ -582,6 +582,13 @@ func (g *Gerente) Spawn(ctx context.Context, request string) (string, error) {
 	cfg, cwd = g.childCfg, g.cwd
 	t.sess = runtime.NewSession(cfg)
 	t.sess.ClearHistory()
+	// ONE conversation identity per task, kept across its requests and
+	// retries. A session without a store sent an empty identity and the dealer
+	// minted a new ses_ id per request: the provider's prefix cache and the
+	// gateway's account affinity were lost on every call (cached_tokens was
+	// NULL in 1770/1770 Kiro requests measured on 13/11/2026). The id is
+	// unique to the task, so two sub-agents never share a cache or an affinity.
+	t.sess.DefinirConversa(runtime.NovoSessaoID() + "-" + t.ID)
 	t.markStarted()
 	g.running++
 	g.mu.Unlock()

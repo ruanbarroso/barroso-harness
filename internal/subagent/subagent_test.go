@@ -40,6 +40,7 @@ type fakeProvider struct {
 	mu          sync.Mutex
 	calls       int
 	views       []reqView
+	sessions    []string // x-opencode-session of each request, in order
 	text        string
 	delay       time.Duration
 	requestTool bool // if true, round 1 asks for list before answering
@@ -51,6 +52,7 @@ func (f *fakeProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.calls++
 	f.views = append(f.views, view)
+	f.sessions = append(f.sessions, r.Header.Get("x-opencode-session"))
 	n := f.calls
 	text, delay, requestTool := f.text, f.delay, f.requestTool
 	f.mu.Unlock()
@@ -97,6 +99,12 @@ func (f *fakeProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"usage":   map[string]any{"prompt_tokens": 42, "completion_tokens": 7},
 	})
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+}
+
+func (f *fakeProvider) Sessions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sessions...)
 }
 
 func (f *fakeProvider) Views() []reqView {
@@ -524,5 +532,53 @@ func TestOneSpawnPerTurn(t *testing.T) {
 	}
 	if n := len(g.Fotos()); n != 3 {
 		t.Fatalf("tasks = %d", n)
+	}
+}
+
+// A sub-agent has no store, so it used to send an empty conversation identity
+// and the dealer minted a NEW ses_ id for every request: the provider's prefix
+// cache and the gateway's account affinity were lost on every call and every
+// retry (cached_tokens was NULL in 1770/1770 Kiro requests measured on
+// 13/11/2026). The requests of ONE task must carry the SAME session id, and two
+// tasks must not share one.
+func TestSubagentKeepsOneConversationIdentityPerTask(t *testing.T) {
+	f, cfg := newServer(t, "done", 0, true) // 2 rounds: the tool call and the answer
+	g := Novo(Config{Nome: "task"})
+	g.Vincular(context.Background())
+	g.ConfigPai(cfg)
+	specs := append(Especificacoes(g, cfg), statusSpec(g, "task"), resultSpec(g, "task"))
+	byName := map[string]tools.Spec{}
+	for _, s := range specs {
+		byName[s.Name] = s
+	}
+	if _, err := runTool(t, byName["task"], `{"prompt":"first"}`); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, g, "t1", Completed, Failed)
+	got := f.Sessions()
+	if len(got) < 2 {
+		t.Fatalf("want at least 2 requests in one task, got %d", len(got))
+	}
+	for i, id := range got {
+		if !strings.HasPrefix(id, "ses_") {
+			t.Fatalf("request %d: x-opencode-session %q is not canonical", i, id)
+		}
+		if id != got[0] {
+			t.Fatalf("request %d minted a new session %q (first was %q): cache and affinity lost", i, id, got[0])
+		}
+	}
+
+	// A second task (another manager = another turn) gets its own identity.
+	f2, cfg2 := newServer(t, "done", 0, false)
+	g2 := Novo(Config{Nome: "task"})
+	g2.Vincular(context.Background())
+	g2.ConfigPai(cfg2)
+	if _, err := runTool(t, Especificacoes(g2, cfg2)[0], `{"prompt":"second"}`); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, g2, "t1", Completed, Failed)
+	other := f2.Sessions()
+	if len(other) == 0 || other[0] == got[0] {
+		t.Fatalf("two tasks must not share a conversation: %v vs %q", other, got[0])
 	}
 }
