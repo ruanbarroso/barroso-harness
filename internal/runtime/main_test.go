@@ -29,6 +29,10 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == bhHelperFlag {
 		os.Exit(bhHelperMain(os.Args[2:]))
 	}
+	// The plain renderer reads EnvSoResposta once, when it is built, and goes
+	// quiet when it is "1": an inherited value would hide the "[tool ...]"
+	// lines the tests look for. Tests that want the quiet mode set it themselves.
+	_ = os.Unsetenv(EnvSoResposta)
 	os.Exit(m.Run())
 }
 

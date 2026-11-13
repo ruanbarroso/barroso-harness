@@ -127,21 +127,42 @@ type RendererCusto interface {
 	Custo(usd float64)
 }
 
-// EnvSoResposta, when set to "1", makes the plain renderer print ONLY the
-// model's answer: no "[tool ...]" header, no tool output echo, no guardrail
-// notice. Panels that publish the stdout as-is (e.g. as an issue comment) set it so
-// the text is just the final message instead of a tool log.
+// EnvSoResposta, when set to exactly "1", makes the plain renderer keep ONLY
+// the model's answer on its output (stdout in `-p`): no "[tool ...]" header
+// and no tool output echo. Panels that publish the stdout as-is (e.g. as an
+// issue comment) set it so the text is just the final message instead of a
+// tool log. The notices about the run itself (guardrail compaction, protocol
+// fallback, output-limit cut) are not part of the answer, so they move to
+// stderr instead of being lost: stdout stays clean and the diagnostics remain
+// available to whoever operates the run. The variable applies to every use of
+// the plain renderer: `-p` and also the REPL when its stdout is not a color
+// terminal (a pipe). The TUI, full screen, ACP and sub-agents never use it.
 const EnvSoResposta = "BH_FINAL_ONLY"
 
 // RendererPuro is the unadorned implementation.
 type RendererPuro struct {
 	out   io.Writer
 	quiet bool
+	// diag receives the run notices in quiet mode. nil means os.Stderr.
+	diag io.Writer
 }
 
-// NovoRendererPuro creates the raw-text renderer over out.
+// NovoRendererPuro creates the raw-text renderer over out. The quiet mode is
+// read once here, at the start of the turn, from EnvSoResposta.
 func NovoRendererPuro(out io.Writer) *RendererPuro {
 	return &RendererPuro{out: out, quiet: os.Getenv(EnvSoResposta) == "1"}
+}
+
+// notice is where a run notice (not the answer, not the tool log) is written:
+// the same output as always, except in quiet mode, where it goes to stderr.
+func (p *RendererPuro) notice() io.Writer {
+	if !p.quiet {
+		return p.out
+	}
+	if p.diag != nil {
+		return p.diag
+	}
+	return os.Stderr
 }
 
 // RendererDe adapts an io.Writer to the interface — compatibility with older
@@ -151,7 +172,7 @@ func RendererDe(out io.Writer) Renderer { return NovoRendererPuro(out) }
 func (p *RendererPuro) Resposta(text string) { fmt.Fprintln(p.out, text) }
 
 func (p *RendererPuro) ProtocoloAlternativo(from, to string) {
-	fmt.Fprintf(p.out, "[protocol] %s endpoint unavailable; using %s\n", from, to)
+	fmt.Fprintf(p.notice(), "[protocol] %s endpoint unavailable; using %s\n", from, to)
 }
 
 func (p *RendererPuro) Tool(name string, dur time.Duration, failed bool) {
@@ -174,21 +195,18 @@ func (p *RendererPuro) Eco(output string) {
 
 func (p *RendererPuro) Cortada(limit int, gaveUp bool) {
 	if gaveUp {
-		fmt.Fprintf(p.out, "[output limit] response cut at %d tokens; giving up\n", limit)
+		fmt.Fprintf(p.notice(), "[output limit] response cut at %d tokens; giving up\n", limit)
 		return
 	}
-	fmt.Fprintf(p.out, "[output limit] response cut at %d tokens; continuing\n", limit)
+	fmt.Fprintf(p.notice(), "[output limit] response cut at %d tokens; continuing\n", limit)
 }
 
 func (p *RendererPuro) Guardrail(proactive bool) {
-	if p.quiet {
-		return
-	}
 	if proactive {
-		fmt.Fprintln(p.out, guardrailProactive)
+		fmt.Fprintln(p.notice(), guardrailProactive)
 		return
 	}
-	fmt.Fprintln(p.out, guardrailReactive)
+	fmt.Fprintln(p.notice(), guardrailReactive)
 }
 
 // Tokens is deliberately silent in plain mode: `-p` feeds recipes through a
