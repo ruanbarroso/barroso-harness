@@ -13,6 +13,7 @@ package runtime
 import (
 	"fmt"
 	"io"
+	"os"
 	"time"
 )
 
@@ -126,11 +127,22 @@ type RendererCusto interface {
 	Custo(usd float64)
 }
 
+// EnvSoResposta, when set to "1", makes the plain renderer print ONLY the
+// model's answer: no "[tool ...]" header, no tool output echo, no guardrail
+// notice. Panels that publish the stdout as-is (e.g. as an issue comment) set it so
+// the text is just the final message instead of a tool log.
+const EnvSoResposta = "BH_FINAL_ONLY"
+
 // RendererPuro is the unadorned implementation.
-type RendererPuro struct{ out io.Writer }
+type RendererPuro struct {
+	out   io.Writer
+	quiet bool
+}
 
 // NovoRendererPuro creates the raw-text renderer over out.
-func NovoRendererPuro(out io.Writer) *RendererPuro { return &RendererPuro{out: out} }
+func NovoRendererPuro(out io.Writer) *RendererPuro {
+	return &RendererPuro{out: out, quiet: os.Getenv(EnvSoResposta) == "1"}
+}
 
 // RendererDe adapts an io.Writer to the interface — compatibility with older
 // callers and with the `-p` path, which only knows how to write bytes.
@@ -143,6 +155,9 @@ func (p *RendererPuro) ProtocoloAlternativo(from, to string) {
 }
 
 func (p *RendererPuro) Tool(name string, dur time.Duration, failed bool) {
+	if p.quiet {
+		return
+	}
 	status := "ok"
 	if failed {
 		status = "error"
@@ -151,7 +166,7 @@ func (p *RendererPuro) Tool(name string, dur time.Duration, failed bool) {
 }
 
 func (p *RendererPuro) Eco(output string) {
-	if output == "" {
+	if p.quiet || output == "" {
 		return
 	}
 	fmt.Fprintln(p.out, output)
@@ -166,6 +181,9 @@ func (p *RendererPuro) Cortada(limit int, gaveUp bool) {
 }
 
 func (p *RendererPuro) Guardrail(proactive bool) {
+	if p.quiet {
+		return
+	}
 	if proactive {
 		fmt.Fprintln(p.out, guardrailProactive)
 		return
