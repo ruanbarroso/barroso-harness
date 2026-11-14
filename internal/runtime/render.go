@@ -66,6 +66,16 @@ type RendererRetry interface {
 	Retentando(attempt, max int, wait time.Duration, reason error)
 }
 
+// RendererFases is OPTIONAL: it is told how a round's wall time split, after
+// the round ends. A client that draws one "thinking" row from the end of a
+// tool to the end of the answer cannot tell the model's time from the
+// machine's (Zoe, 13/11: a 1m25s "thinking" held 4 s of model time). prep is
+// the harness' own work before the request left, model the provider's
+// duration, tools the wall time of the previous cycle's tools.
+type RendererFases interface {
+	Fases(prep, model, tools time.Duration)
+}
+
 // RendererProtocolFallback is OPTIONAL: it receives a notice when a provider
 // lacks Responses and the dealer uses Chat Completions instead.
 type RendererProtocolFallback interface {

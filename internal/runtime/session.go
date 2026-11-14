@@ -459,6 +459,14 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 	// No cycle limit: the turn runs until the model answers with text or the
 	// user interrupts it (Esc / Ctrl+C cancels ctx).
 	var loop loopGuard
+	// prevEnd marks when the previous cycle's tools finished (or the turn
+	// began). The gap to the moment the request leaves is the LOCAL work of the
+	// harness: catalog, skills, budget, pruning. It is logged as prep_ms so a
+	// panel can tell "the machine was busy" apart from "the model was thinking"
+	// (Zoe, 13/11: a 1m25s "thinking" held 4 s of model time).
+	prevEnd := time.Now()
+	var toolsMs int64    // wall time of the previous cycle's tools, 0 on the first
+	var toolsSumMs int64 // sum of each tool's own time (parallel calls overlap, so >= toolsMs)
 	for cycle := 0; ; cycle++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -694,6 +702,9 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		if rr, ok := r.(RendererRetry); ok {
 			cli = cli.ComAviso(rr.Retentando)
 		}
+		// Local work of this cycle: from the end of the previous cycle (its
+		// tools, or the start of the turn) to the moment the request leaves.
+		prepMs := time.Since(prevEnd).Milliseconds()
 		round, err := cli.RodarContext(ctx, system, requestHistory, schemas)
 		if err != nil {
 			if contextOverflow(err) && !reactiveCompacted {
@@ -748,6 +759,13 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		if rr, ok := r.(RendererRaciocinio); ok && strings.TrimSpace(round.Raciocinio) != "" {
 			rr.Pensou(round.Raciocinio, round.DurRaciocinio)
 		}
+		// Tell a client that draws phases how the wall time of this round split.
+		// Only a round that came back reaches here; a failed request is retried
+		// or ends the turn above.
+		if rf, ok := r.(RendererFases); ok {
+			prep, model, tools := time.Duration(prepMs)*time.Millisecond, round.Dur, time.Duration(toolsMs)*time.Millisecond
+			rf.Fases(prep, model, tools)
+		}
 		if round.Usage != nil {
 			if rd, ok := r.(RendererDetalhado); ok {
 				rd.Contexto(round.Usage.PromptTokens)
@@ -767,6 +785,17 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				"tools_bytes":   jsonLen(schemas),
 				"system_bytes":  len(system),
 				"tool_calls":    len(round.Tools),
+				// duration_ms is the provider only. prep_ms is the local time
+				// before the request left (catalog, budget, pruning, and
+				// whatever the machine was busy with); tools_ms is the wall
+				// time of the PREVIOUS cycle's tools. Together with
+				// duration_ms they account for the whole gap a panel shows
+				// as "thinking".
+				"prep_ms":  prepMs,
+				"tools_ms": toolsMs,
+				// With parallel calls tools_ms is the wall time and
+				// tools_sum_ms the sum of each call's own time.
+				"tools_sum_ms": toolsSumMs,
 			})
 			s.est.Calibrar(len(body), round.Usage.PromptTokens)
 			if round.Usage.PromptTokens > 0 {
@@ -930,9 +959,15 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 				"tool_args": call.Args,
 			})
 		}
+		toolsStart := time.Now()
+		var toolsSum time.Duration
 		for _, out := range s.runRound(ctx, r, list, cwd, round.Tools) {
+			toolsSum += out.dur
 			results = append(results, dealer.Mensagem{Role: "tool_result", Conteudo: out.output, ToolID: out.call.ID, ToolName: out.call.Nome, IsErro: out.isErr})
 		}
+		toolsMs = time.Since(toolsStart).Milliseconds()
+		toolsSumMs = toolsSum.Milliseconds()
+		prevEnd = time.Now()
 		// The loop guard compares outcomes, not arguments: Bruce spent 18
 		// minutes on 154 shell calls whose outputs were identical even though
 		// the arguments were spelled differently (`tail -4` vs `tail -n 4`).

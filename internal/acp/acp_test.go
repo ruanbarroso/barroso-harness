@@ -160,6 +160,7 @@ type fakeTurn struct {
 	thought string        // provider-exposed reasoning, emitted through RendererRaciocinio
 	nota    string        // intermediate text, emitted through RendererNota
 	args    string        // when set, tools go through RendererAoVivo with these args
+	fases   bool          // emits RendererFases (the wall-time split)
 
 	started chan struct{}
 	once    sync.Once
@@ -207,6 +208,11 @@ func (f *fakeTurn) Send(ctx context.Context, r runtime.Renderer, cwd, prompt str
 	}
 	for _, name := range f.fails {
 		r.Tool(name, 3*time.Millisecond, true)
+	}
+	if f.fases {
+		if rf, ok := r.(runtime.RendererFases); ok {
+			rf.Fases(40*time.Second, 4*time.Second, 9*time.Second)
+		}
 	}
 	if f.compact {
 		r.Guardrail(true)
@@ -1223,5 +1229,76 @@ func TestRenderTokensEmitsNothing(t *testing.T) {
 	ls = waitLines(t, h.out, 3)
 	if len(ls) != 3 {
 		t.Fatalf("Tokens should emit nothing; got %d lines:\n%s", len(ls), h.out.String())
+	}
+}
+
+// ── phases ──────────────────────────────────────────────────────────────────
+
+// The wall time of a round splits into the harness' own work, the model and
+// the previous tools. The renderer carries the split as a _meta marker so the
+// panel can stop calling all of it "thinking": it must not be text, and it
+// must not become reasoning (agent_thought_chunk), or the client would show it
+// inside the thinking row it is meant to correct.
+func TestPhasesMarkerCarriesTheSplitWithoutText(t *testing.T) {
+	f := &fakeTurn{started: make(chan struct{}), fases: true, text: "ok"}
+	h := setup(t, f)
+	h.send(t, MetSessionNovo, 2, map[string]any{"cwd": "."})
+	ls := waitLines(t, h.out, 1)
+	id := ls[0].Result["sessionId"].(string)
+
+	h.send(t, MetPrompt, 3, map[string]any{
+		"sessionId": id,
+		"prompt":    []map[string]string{{"type": "text", "text": "go"}},
+	})
+	waitLines(t, h.out, 4)
+
+	var found bool
+	for _, l := range readLines(t, h.out) {
+		if l.Params.Update.SessionUpdate == "agent_thought_chunk" {
+			t.Fatalf("phases must not be reasoning text:\n%s", h.out.String())
+		}
+		if len(l.Params.Update.Meta) == 0 {
+			continue
+		}
+		var meta struct {
+			Phases *struct {
+				PrepMs  int64 `json:"prepMs"`
+				ModelMs int64 `json:"modelMs"`
+				ToolsMs int64 `json:"toolsMs"`
+			} `json:"barroso/phases"`
+		}
+		if err := json.Unmarshal(l.Params.Update.Meta, &meta); err != nil || meta.Phases == nil {
+			continue
+		}
+		found = true
+		if l.Params.Update.SessionUpdate != "session_info_update" {
+			t.Errorf("marker travels as %q, expected session_info_update", l.Params.Update.SessionUpdate)
+		}
+		if meta.Phases.PrepMs != 40000 || meta.Phases.ModelMs != 4000 || meta.Phases.ToolsMs != 9000 {
+			t.Errorf("phases = %+v, expected prep 40000, model 4000, tools 9000", *meta.Phases)
+		}
+		if len(l.Params.Update.Content.Blocks) != 0 {
+			t.Errorf("phases marker carries content %+v", l.Params.Update.Content.Blocks)
+		}
+	}
+	if !found {
+		t.Fatalf("no barroso/phases marker:\n%s", h.out.String())
+	}
+}
+
+// Without RendererFases a client keeps working: no marker, no failure.
+func TestNoPhasesMarkerWhenTheTurnDoesNotReportThem(t *testing.T) {
+	f := &fakeTurn{started: make(chan struct{}), text: "ok"}
+	h := setup(t, f)
+	h.send(t, MetSessionNovo, 2, map[string]any{"cwd": "."})
+	ls := waitLines(t, h.out, 1)
+	id := ls[0].Result["sessionId"].(string)
+	h.send(t, MetPrompt, 3, map[string]any{
+		"sessionId": id,
+		"prompt":    []map[string]string{{"type": "text", "text": "go"}},
+	})
+	waitLines(t, h.out, 3)
+	if strings.Contains(h.out.String(), "barroso/phases") {
+		t.Fatalf("unexpected phases marker:\n%s", h.out.String())
 	}
 }

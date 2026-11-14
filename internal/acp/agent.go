@@ -881,6 +881,24 @@ func (r *acpRenderer) Retentando(attempt, max int, wait time.Duration, reason er
 	r.a.logf("acp: session %s: %s", r.session, text)
 }
 
+// Fases reports how the wall time of the round that just ended split between
+// the harness (prepMs, before the request left), the model (modelMs) and the
+// previous cycle's tools (toolsMs). It is a _meta marker, not text: a client
+// that does not know it ignores it, and "thinking" stays the model's time
+// only. Without it a panel draws one row from the end of a tool to the end
+// of the answer, and a busy machine reads as a slow model (Zoe, 13/11).
+func (r *acpRenderer) Fases(prep, model, tools time.Duration) {
+	r.emit("session_info_update", map[string]any{
+		"_meta": map[string]any{
+			"barroso/phases": map[string]any{
+				"prepMs":  prep.Milliseconds(),
+				"modelMs": model.Milliseconds(),
+				"toolsMs": tools.Milliseconds(),
+			},
+		},
+	})
+}
+
 // KeepaliveInterval is how often a running turn speaks on the wire. A variable,
 // not a constant, so tests can shrink it.
 var keepaliveInterval = 20 * time.Second

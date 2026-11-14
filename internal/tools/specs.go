@@ -159,13 +159,14 @@ func specTerminalOutput() Spec {
 	return Spec{
 		Name: "shell_output",
 		Description: "Waits for a background shell job and returns its new output, or its final exit_code when it ended. " +
-			"Without jobID lists the jobs. Waits up to waitSecs (default 60, max 600) — prefer one long wait over many short polls. " +
-			"You do not need it to learn that a background job ended: you are notified with a new turn.",
+			"Without jobID lists the jobs. Waits up to waitSecs (default 60, max 300). " +
+			"A turn blocked here does no other work, and you do NOT need it to learn that a job ended: you are notified with a new turn. " +
+			"Do other work first, follow progress by reading the job's output file, and wait here only when nothing else is left.",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"jobID":    map[string]any{"type": "string"},
-				"waitSecs": map[string]any{"type": "integer", "description": "how long to wait for it to finish (default 60, max 600; 0 = just peek)"},
+				"waitSecs": map[string]any{"type": "integer", "description": "how long to wait for it to finish (default 60, max 300; 0 = just peek)"},
 			},
 		},
 		Exec: func(ctx context.Context, _ string, raw json.RawMessage) (string, error) {

@@ -37,8 +37,12 @@ var (
 	inactivityTimeout = 300 * time.Second
 	waitDelay         = 2 * time.Second
 	// defaultOutputWait / maxOutputWait bound one shell_output call.
+	// 300 s, not the old 10 min: Codex caps its wait at 5 min, and a turn
+	// parked on a wait does no work at all (Zoe, 13/11: shell_output waits
+	// of 600 s kept the turn idle for 10 min each). Long builds stay in
+	// the background and are reported on their own when they end.
 	defaultOutputWait = 60 * time.Second
-	maxOutputWait     = 10 * time.Minute
+	maxOutputWait     = 5 * time.Minute
 	spillRetention    = 7 * 24 * time.Hour
 )
 
@@ -288,7 +292,14 @@ func (j *job) status(why string) string {
 	if j.out.path != "" {
 		sb.WriteString("full output file: " + j.out.path + "\n")
 	}
-	fmt.Fprintf(&sb, "Call shell_output {\"jobID\":%q} to wait for it and read new output, or shell_kill to stop it. Do something else meanwhile if you can.", j.id)
+	// Steer the agent AWAY from parking the turn on a wait. A turn blocked in
+	// shell_output does nothing else (Zoe, 13/11: waits of 5-10 min on a
+	// saturated machine); the end of the job is reported on its own.
+	sb.WriteString("The job keeps running and you will be told when it ends: do other work now, and look at progress by reading the output file")
+	if j.out.path == "" {
+		sb.WriteString(" (shell_output with waitSecs 0 peeks)")
+	}
+	fmt.Fprintf(&sb, ". Use shell_output {\"jobID\":%q} only when nothing else is left to do (waits are capped at %d s), or shell_kill to stop it.", j.id, int(maxOutputWait/time.Second))
 	return sb.String()
 }
 
