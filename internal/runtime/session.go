@@ -972,15 +972,13 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 		// minutes on 154 shell calls whose outputs were identical even though
 		// the arguments were spelled differently (`tail -4` vs `tail -n 4`).
 		// It runs BEFORE the round joins the transcript so a blocked round can
-		// carry a refusal instead of the repeated output (the call/result
-		// pairing stays valid for every provider).
+		// carry the refusal (the call/result pairing stays valid for every
+		// provider). The refusal is appended to the real output, never a
+		// replacement: conversation 129051 (2026-11-15) looped on an error that
+		// said which argument was missing, and a blocked round that swallowed
+		// that text left the model nothing to fix the call with.
 		notice, verdict := loop.observe(round.Tools, results)
-		if verdict >= loopVerdictBlock {
-			for i := range results {
-				results[i].Conteudo = blockedError(notice)
-				results[i].IsErro = true
-			}
-		}
+		results = loop.blockedResults(verdict, round.Tools, results)
 		working = append(working, turn...)
 		working = append(working, results...)
 		// Images opened with read reach the model as images: the tool result

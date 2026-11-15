@@ -113,8 +113,89 @@ func TestLoopGuardTighterAfterCompaction(t *testing.T) {
 	}
 }
 
-func TestBlockedErrorMentionsRepetition(t *testing.T) {
-	if !strings.Contains(blockedError("[loop] hi"), "loop guard") {
-		t.Fatal("blocked error must say who refused the call")
+// The refusal is appended to the real output, never a replacement: the
+// 129051 loop (2026-11-15) was an error that said which argument was missing,
+// and the block used to swallow that text.
+func TestBlockedRoundKeepsRealOutput(t *testing.T) {
+	const real = "error: mcp wpp.listar_conversas: há 2 contas; diga qual em `conta`: A, B"
+	calls := []dealer.ToolChamada{{ID: "c1", Nome: "listar_conversas", Args: "{}"}}
+	var g loopGuard
+	var verdict int
+	var results []dealer.Mensagem
+	for i := 0; i < loopBlock; i++ {
+		_, results = loopRound(calls, real)
+		_, verdict = g.observe(calls, results)
+	}
+	if verdict != loopVerdictBlock {
+		t.Fatalf("verdict = %d, want block", verdict)
+	}
+	got := g.blockedResults(verdict, calls, results)
+	if len(got) != 1 || !got[0].IsErro || got[0].ToolID != "c1" {
+		t.Fatalf("blocked result lost its pairing or error flag: %+v", got)
+	}
+	if !strings.Contains(got[0].Conteudo, real) {
+		t.Fatalf("blocked result dropped the real output: %q", got[0].Conteudo)
+	}
+	if !strings.Contains(got[0].Conteudo, "loop guard") {
+		t.Fatalf("blocked result does not say who refused it: %q", got[0].Conteudo)
+	}
+	if results[0].Conteudo != real {
+		t.Fatal("blockedResults mutated the caller's slice")
+	}
+}
+
+func TestBlockedResultsBelowBlockAreUntouched(t *testing.T) {
+	var g loopGuard
+	calls := []dealer.ToolChamada{{ID: "c1", Nome: "read", Args: "{}"}}
+	_, results := loopRound(calls, "x")
+	got := g.blockedResults(loopVerdictWarn, calls, results)
+	if got[0].Conteudo != "x" || got[0].IsErro {
+		t.Fatalf("warn must not touch the result: %+v", got[0])
+	}
+}
+
+// The notice names the argument the error asks for, when the call lacks it.
+func TestNoticeNamesMissingArgumentFromError(t *testing.T) {
+	const real = "error: mcp wpp.listar_conversas: há 2 contas; diga qual em `conta`: A, B"
+	calls := []dealer.ToolChamada{{ID: "c1", Nome: "tool_call", Args: `{"name":"listar_conversas"}`}}
+	var g loopGuard
+	var n string
+	for i := 0; i < loopWarn; i++ {
+		_, results := loopRound(calls, real)
+		n, _ = g.observe(calls, results)
+	}
+	if !strings.Contains(n, `"conta"`) {
+		t.Fatalf("notice does not name the missing argument: %q", n)
+	}
+}
+
+// A call that already carries the field named by the error gets no hint: the
+// guard must not tell the model to add what it already sent.
+func TestNoticeSkipsFieldTheCallAlreadyHas(t *testing.T) {
+	const real = "error: mcp wpp.listar_conversas: há 2 contas; diga qual em `conta`: A, B"
+	calls := []dealer.ToolChamada{{ID: "c1", Nome: "tool_call", Args: `{"name":"listar_conversas","arguments":{"conta":"x"}}`}}
+	var g loopGuard
+	var n string
+	for i := 0; i < loopWarn; i++ {
+		_, results := loopRound(calls, real)
+		n, _ = g.observe(calls, results)
+	}
+	if strings.Contains(n, "is absent from this call") {
+		t.Fatalf("hint for a field the call already has: %q", n)
+	}
+}
+
+func TestErrorFieldNameIgnoresNonErrorsAndOddQuotes(t *testing.T) {
+	calls := []dealer.ToolChamada{{ID: "c1", Nome: "shell", Args: `{}`}}
+	for _, out := range []string{
+		"all fine, see `foo` here", // not an error
+		"error: use `two words` here",
+		"error: nothing quoted",
+		"error: open `unclosed",
+	} {
+		_, results := loopRound(calls, out)
+		if f := errorFieldName(calls, results); f != "" {
+			t.Fatalf("%q -> %q, want no field", out, f)
+		}
 	}
 }
