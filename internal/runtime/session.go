@@ -662,6 +662,24 @@ func (s *Session) SendWithImages(ctx context.Context, r Renderer, cwd, prompt st
 					})
 					continue
 				}
+				// Nothing older is left to drop: the weight sits in the newest
+				// result(s) (conversation 129062: one 900 KB tool result).
+				// Cut them down rather than fail the turn.
+				if shrunk := shrinkResults(working, s.est.Bytes(ev.TokensEntrada+ev.TokensSaida-s.config.Janela)); shrunk != nil {
+					before := historyBytes(working)
+					working = shrunk
+					floor = 0
+					compacted = true
+					r.Guardrail(true)
+					s.record(eventCompaction, map[string]any{
+						"politica":     policy(s.config.PoliticaContexto),
+						"tipo":         "corte_resultado",
+						"ciclo":        cycle,
+						"bytes_antes":  before,
+						"bytes_depois": historyBytes(working),
+					})
+					continue
+				}
 				return fmt.Errorf("guardrail: request does not fit (%s) and pruning did not free enough", ev.Veredito())
 			}
 			r.Guardrail(true)

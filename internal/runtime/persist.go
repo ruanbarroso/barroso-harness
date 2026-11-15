@@ -207,6 +207,12 @@ func eventsToMessages(st *store.Store, events []store.Event) []dealer.Mensagem {
 		if p.Blob != "" {
 			m.Conteudo = rehydrate(st, p.Blob, p.Preview)
 		}
+		// Logs written before the cap hold results of hundreds of KB (a base64
+		// image from an MCP tool poisoned conversation 129062): bring them
+		// back within the cap, or the session never fits its window again.
+		if m.Role == "tool_result" {
+			m.Conteudo = capToolResult(m.Conteudo)
+		}
 		out = append(out, m)
 	}
 	return out
