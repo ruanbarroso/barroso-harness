@@ -22,6 +22,9 @@ const (
 	// sessionHeader is the streamable-HTTP session header: the server hands
 	// it out in the initialize response and expects it back on every call.
 	sessionHeader = "Mcp-Session-Id"
+	// closeTimeout caps the session-ending DELETE: it is best-effort, so a
+	// hung server must not hold the process exit.
+	closeTimeout = 5 * time.Second
 )
 
 // ErrSessionExpired: the server answered 404 to a call that carried a
@@ -116,6 +119,59 @@ func (e parseError) Unwrap() error { return e.err }
 func isParseError(err error) bool {
 	var p parseError
 	return errors.As(err, &p)
+}
+
+// Close ends the server-side session. The streamable-HTTP spec makes DELETE
+// optional — a server that keeps sessions after the client goes away must
+// expire them on its own — so the failure is returned and ignored by the
+// caller. It is what keeps a long-lived gateway (an MCP bridge hosted by the
+// app's API) from accumulating one session per harness process.
+func (h *HTTP) Close(ctx context.Context) error {
+	sent := h.SessionID()
+	if sent == "" {
+		return nil // nothing to end: never send a sessionless DELETE
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cctx, cancel := context.WithTimeout(ctx, closeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(cctx, http.MethodDelete, h.URL, nil)
+	if err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+	if h.UserAgent != "" {
+		req.Header.Set("User-Agent", h.UserAgent)
+	}
+	req.Header.Set(sessionHeader, sent)
+	for k, v := range h.Headers {
+		if k == "" {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+
+	client := h.Client
+	if client == nil {
+		client = &http.Client{}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("close: HTTP %d", resp.StatusCode)
+	}
+
+	h.mu.Lock()
+	if h.session == sent {
+		h.session = ""
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // post performs the HTTP round trip. id nil = notification (the body is

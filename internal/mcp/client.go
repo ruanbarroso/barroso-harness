@@ -775,7 +775,9 @@ func orDefault(v, fb string) string {
 // ── closing ──────────────────────────────────────────────────────────────
 
 // Fecha closes the connection. On stdio: closes stdin (a well-behaved server
-// exits on EOF), waits up to 5 s and only then sends Kill. Idempotent.
+// exits on EOF), waits up to 5 s and only then sends Kill. On HTTP: ends the
+// server-side session (best-effort DELETE), so a gateway does not keep a
+// session per process. Idempotent.
 //
 // Order matters: the done channel is signalled first, so pending senders give
 // up instead of blocking; the outbox channel is never closed, so the single
@@ -783,6 +785,13 @@ func orDefault(v, fb string) string {
 func (c *Cliente) Fecha() error {
 	c.closeOnce.Do(func() {
 		close(c.done) // whoever waits for a response wakes up here
+
+		// HTTP first: the session lives on the server and outlives the process,
+		// so it is the half that MUST be ended explicitly. Best-effort — a
+		// gateway that ignores DELETE expires sessions on its own.
+		if c.httpT != nil {
+			_ = c.httpT.Close(context.Background())
+		}
 
 		if c.stdin != nil {
 			_ = c.stdin.Close() // EOF: the server exits on its own

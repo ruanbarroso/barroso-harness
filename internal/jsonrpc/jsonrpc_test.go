@@ -128,3 +128,61 @@ func TestNotifyToleratesEmptyAndOddBodies(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// Close ends the server session with a DELETE carrying the session id and the
+// configured headers, then forgets the id; without a session it sends nothing.
+func TestHTTPCloseDeletesSession(t *testing.T) {
+	var methods, sessions, auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		sessions = append(sessions, r.Header.Get("Mcp-Session-Id"))
+		auths = append(auths, r.Header.Get("Authorization"))
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "s1")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer srv.Close()
+
+	h := &HTTP{URL: srv.URL, Headers: map[string]string{"Authorization": "Bearer t"}}
+	if err := h.Close(context.Background()); err != nil || len(methods) != 0 {
+		t.Fatalf("sessionless Close = %v, requests %v", err, methods)
+	}
+	if _, err := h.Call(context.Background(), NewRequest(1, "x", nil)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if err := h.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(methods) != 2 || methods[1] != http.MethodDelete || sessions[1] != "s1" || auths[1] != "Bearer t" {
+		t.Errorf("methods=%v sessions=%v auths=%v", methods, sessions, auths)
+	}
+	if h.SessionID() != "" {
+		t.Error("session id kept after Close")
+	}
+}
+
+// A server that refuses DELETE (405 is allowed by the spec) reports an error
+// the caller ignores; it never hangs.
+func TestHTTPCloseToleratesRefusal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "s1")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer srv.Close()
+	h := &HTTP{URL: srv.URL}
+	if _, err := h.Call(context.Background(), NewRequest(1, "x", nil)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if err := h.Close(context.Background()); err == nil || !strings.Contains(err.Error(), "405") {
+		t.Errorf("Close err = %v", err)
+	}
+}

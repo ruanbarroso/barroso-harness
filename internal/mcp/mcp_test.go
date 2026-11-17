@@ -30,6 +30,8 @@ type fakeMCP struct {
 	sse           bool // frame responses as SSE events
 	batch         bool // reply to tools/call as a JSON-RPC batch
 	noContentType bool // generic Content-Type on SSE (forces sniffing)
+
+	deleted int // DELETE (session close) requests received
 }
 
 // write emits a response in the format requested by the test.
@@ -73,6 +75,14 @@ func (f *fakeMCP) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.Method != http.MethodPost {
+		// DELETE (session close) is the only other method the client sends.
+		if req.Method == http.MethodDelete {
+			f.mu.Lock()
+			f.deleted++
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		http.Error(w, "method not supported", http.StatusMethodNotAllowed)
 		return
 	}
@@ -95,7 +105,12 @@ func (f *fakeMCP) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	switch m.Method {
 	case "initialize":
-		f.write(w, f, f.initResp, idForResponse(m.ID))
+		// Streamable HTTP hands out a session id in initialize; without one the
+	// client has nothing to close.
+	if m.Method == "initialize" {
+		w.Header().Set("Mcp-Session-Id", "sess-1")
+	}
+	f.write(w, f, f.initResp, idForResponse(m.ID))
 	case "tools/list":
 		if f.toolsResp == nil {
 			f.toolsResp = map[string]any{"tools": []any{}}
@@ -127,6 +142,13 @@ func (f *fakeMCP) seenMethods() []string {
 	out := make([]string, len(f.seen))
 	copy(out, f.seen)
 	return out
+}
+
+// deletedCount returns how many session-close DELETEs the server received.
+func (f *fakeMCP) deletedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deleted
 }
 
 // newFake starts an httptest.Server and returns it plus its URL.
@@ -738,5 +760,44 @@ func TestSummarizeHTTP(t *testing.T) {
 	long := bytes.Repeat([]byte("x"), 500)
 	if got := summarizeHTTP(long, 10); len([]rune(got)) > 11 {
 		t.Errorf("summarizeHTTP did not truncate: %d runes", len([]rune(got)))
+	}
+}
+
+// Fecha must end the server-side HTTP session (one DELETE), so a gateway does
+// not keep a session per harness process.
+func TestFechaClosesHTTPSession(t *testing.T) {
+	f := &fakeMCP{initResp: initializeResult()}
+	_, url := newFake(t, f)
+
+	c, err := Novo(Servidor{Nome: "fake", Tipo: "http", URL: url, Timeout: 5})
+	if err != nil {
+		t.Fatalf("Novo: %v", err)
+	}
+	if err := c.Abre(context.Background()); err != nil {
+		t.Fatalf("Abre: %v", err)
+	}
+	if err := c.Fecha(); err != nil {
+		t.Fatalf("Fecha: %v", err)
+	}
+	if f.deletedCount() != 1 {
+		t.Errorf("DELETE count = %d; want 1", f.deletedCount())
+	}
+	// Idempotent: a second Fecha must not send a second DELETE.
+	if err := c.Fecha(); err != nil {
+		t.Fatalf("Fecha 2: %v", err)
+	}
+	if f.deletedCount() != 1 {
+		t.Errorf("DELETE count after second Fecha = %d", f.deletedCount())
+	}
+}
+
+// A stdio server must not get a DELETE (there is no session to end).
+func TestFechaStdioDoesNotDelete(t *testing.T) {
+	c, err := Novo(Servidor{Nome: "fake", Tipo: "stdio", Command: "cmd"})
+	if err != nil {
+		t.Fatalf("Novo: %v", err)
+	}
+	if c.httpT != nil {
+		t.Error("stdio client carries an HTTP transport")
 	}
 }
